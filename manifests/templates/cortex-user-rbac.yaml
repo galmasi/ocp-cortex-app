@@ -1,0 +1,60 @@
+# RBAC for a single Cortex user, applied inside their cortex-<username>
+# namespace by the reconciler when the namespace is created.
+#
+# Grants exactly what the plugin needs to start and attach to the user's
+# own instance — and nothing that reaches any other user's namespace.
+#
+# Usage (USERNAME must be the sanitized, NAMESPACE the real one):
+#   NAMESPACE=cortex-alice USER=alice-agalmasi
+#   sed -e "s/\${NAMESPACE}/$NAMESPACE/" -e "s/\${USER}/$USER/" \
+#       cortex-user-rbac.yaml | oc apply -f -
+#
+# NOTE: the RoleBinding subject is the *cluster* user name (login
+# identity), which may differ from the sanitized namespace suffix —
+# that mapping is the reconciler's job.
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cortex-user
+  namespace: ${NAMESPACE}
+  labels:
+    app: cortex
+rules:
+  # Terminal attach
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec"]
+    verbs: ["get", "list", "watch", "create"]
+  # Start/stop own instance (create on first open, patch replicas on later)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Read and customize own instance config
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Create own service/route on first open (forward proxy ingress)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch", "create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cortex-user
+  namespace: ${NAMESPACE}
+  labels:
+    app: cortex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cortex-user
+subjects:
+  - kind: User
+    name: ${USER}
+    apiGroup: rbac.authorization.k8s.io
