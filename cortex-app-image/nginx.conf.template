@@ -16,9 +16,9 @@
 #                    rides as ?access_token= and is moved into the
 #                    header here. The /ws prefix is stripped.
 #
-# TLS: this pod presents the cluster wildcard certificate (secret
-# cortex-tls) behind a passthrough Route — same ingress pattern as
-# the per-user instances. Clients get the cluster's LE cert.
+# TLS: terminated at the ROUTER (edge route, cluster wildcard cert via
+# externalCertificate; http:80 redirects to https there). This server
+# speaks plain HTTP to the router on 8080.
 #
 # (No "daemon off;" here: the base image's CMD already passes
 # -g "daemon off;" and a second occurrence is a fatal error.)
@@ -39,11 +39,11 @@ http {
   access_log /dev/stdout noquery;
 
   server {
-    listen 8443 ssl;
+    # TLS is terminated by the router (edge route with the cluster
+    # wildcard cert via externalCertificate; http on :80 is redirected
+    # to https there too) — this server speaks plain HTTP to the router.
+    listen 8080;
     server_name _;
-
-    ssl_certificate /etc/nginx/certs/tls.crt;
-    ssl_certificate_key /etc/nginx/certs/tls.key;
 
     root /usr/share/nginx/html;
     index index.html;

@@ -3,20 +3,21 @@
 # Creates (namespace cortex):
 #   - ConfigMap cortex-nginx-template (nginx.conf.template — kept out of
 #     the image so config changes deploy without an image rebuild;
-#     cortex-image/nginx.conf.template in the repo is the source of
+#     cortex-app-image/nginx.conf.template in the repo is the source of
 #     truth for this block — keep them in sync)
 #   - Deployment cortex  (nginx: SPA + OAuth exchange + API/WS proxy)
-#   - Service cortex     (8443)
-#   - Route cortex       (cortex.apps.<domain>, passthrough)
+#   - Service cortex     (8080, plain HTTP)
+#   - Role/RoleBinding router-cert-reader (lets the router SA read the
+#     cortex-tls secret for the edge route's externalCertificate)
+#   - Route cortex       (cortex.apps.<domain>, edge termination with the
+#     cluster wildcard cert, http:80 -> https redirect)
 #
 # Prerequisites (NOT created here — cluster-admin / reconciler applies):
-#   - Secret cortex-tls: copy of the router's wildcard cert
-#     (see scripts/reconcile.sh for the per-user copies; same procedure)
-#   - Secret cortex-oauth: { OAUTH_BASIC: base64("cortex:<secret>") }
+#   - Secret cortex-oauth: OAUTH_BASIC = base64("cortex:<secret>")
 #     matching the OAuthClient's secret (manifests/oauthclient.yaml)
-#
-# Route host note: cortex.apps.<domain> is the OpenShift console itself
-# on this cluster, so the app uses cortex.apps.<domain>.
+#   - Secret cortex-tls: copy of the router's wildcard cert — used by the
+#     ROUTE (externalCertificate); TLS is terminated at the router and
+#     the pod serves plain HTTP on 8080.
 #
 # Upstream note: pods on this cluster CANNOT reach service ClusterIPs
 # (verified empirically, Oct 2026) — the API and WS proxies target the
@@ -55,43 +56,43 @@ data:
     #                    rides as ?access_token= and is moved into the
     #                    header here. The /ws prefix is stripped.
     #
-    # TLS: this pod presents the cluster wildcard certificate (secret
-    # cortex-tls) behind a passthrough Route — same ingress pattern as
-    # the per-user instances. Clients get the cluster's LE cert.
+    # TLS: terminated at the ROUTER (edge route, cluster wildcard cert via
+    # externalCertificate; http:80 redirects to https there). This server
+    # speaks plain HTTP to the router on 8080.
     #
     # (No "daemon off;" here: the base image's CMD already passes
     # -g "daemon off;" and a second occurrence is a fatal error.)
-    
+
     worker_processes 1;
     error_log /dev/stderr info;
     pid /tmp/nginx.pid;
-    
+
     events { worker_connections 1024; }
-    
+
     http {
       include /etc/nginx/mime.types;
       default_type application/octet-stream;
-    
+
       # Session tokens ride in query strings on /ws — log URIs without args.
       log_format noquery '$remote_addr - $remote_user [$time_local] '
                           '"$request_method $uri" $status $body_bytes_sent';
       access_log /dev/stdout noquery;
-    
+
       server {
-        listen 8443 ssl;
+        # TLS is terminated by the router (edge route with the cluster
+        # wildcard cert via externalCertificate; http on :80 is redirected
+        # to https there too) — this server speaks plain HTTP to the router.
+        listen 8080;
         server_name _;
-    
-        ssl_certificate /etc/nginx/certs/tls.crt;
-        ssl_certificate_key /etc/nginx/certs/tls.key;
-    
+
         root /usr/share/nginx/html;
         index index.html;
-    
+
         # --- static SPA; deep links (/auth/callback) fall back to index ---
         location / {
           try_files $uri $uri/ /index.html;
         }
-    
+
         # --- OAuth code exchange: the only place the client secret lives ---
         location = /auth/exchange {
           proxy_pass https://oauth-openshift.apps.epoc000.ete14.res.ibm.com/oauth/token;
@@ -99,7 +100,7 @@ data:
           proxy_set_header Content-Type "application/x-www-form-urlencoded";
           proxy_ssl_server_name on;
         }
-    
+
         # --- Kubernetes REST: forward the browser's Bearer token as-is ---
         location /api/ {
           proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
@@ -117,7 +118,7 @@ data:
           proxy_ssl_server_name on;
           proxy_ssl_name api.epoc000.ete14.res.ibm.com;
         }
-    
+
         # --- exec/attach WebSockets: token from ?access_token= ---
         location /ws/ {
           proxy_pass https://api.epoc000.ete14.res.ibm.com:6443/;
@@ -136,6 +137,7 @@ data:
         }
       }
     }
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -159,7 +161,7 @@ spec:
           image: icr.io/vopo/cortex-app:0.1
           imagePullPolicy: Always
           ports:
-            - containerPort: 8443
+            - containerPort: 8080
           env:
             # base64("cortex:<oauth client secret>") — from Secret
             # cortex-oauth; injected into nginx.conf via envsubst.
@@ -169,22 +171,16 @@ spec:
                   name: cortex-oauth
                   key: OAUTH_BASIC
           volumeMounts:
-            - name: app-tls
-              mountPath: /etc/nginx/certs
-              readOnly: true
             - name: nginx-template
               mountPath: /etc/nginx/templates
               readOnly: true
           readinessProbe:
             httpGet:
               path: /index.html
-              port: 8443
-              scheme: HTTPS
+              port: 8080
+              scheme: HTTP
             initialDelaySeconds: 5
       volumes:
-        - name: app-tls
-          secret:
-            secretName: cortex-tls
         - name: nginx-template
           configMap:
             name: cortex-nginx-template
@@ -200,9 +196,11 @@ spec:
   selector:
     app: cortex
   ports:
-    - port: 8443
-      targetPort: 8443
+    - port: 8080
+      targetPort: 8080
 ---
+# The router terminates TLS with the cluster wildcard cert
+# (externalCertificate) and redirects http:80 to https:443.
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -211,14 +209,42 @@ metadata:
   labels:
     app: cortex
 spec:
-  # Passthrough: this pod presents the cluster wildcard cert itself
-  # (secret cortex-tls), so clients see the cluster's certificate.
   host: cortex.apps.epoc000.ete14.res.ibm.com
   to:
     kind: Service
     name: cortex
     weight: 100
   port:
-    targetPort: 8443
+    targetPort: 8080
   tls:
-    termination: passthrough
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: cortex-tls
+---
+# Lets the router service account read the cortex-tls secret for the
+# edge route's externalCertificate (scoped to this one secret).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: router-cert-reader
+  namespace: cortex
+rules:
+  - apiGroups: [""]
+    verbs: [get, watch, list]
+    resources: [secrets]
+    resourceNames: [cortex-tls]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: router-cert-reader
+  namespace: cortex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: router-cert-reader
+subjects:
+  - kind: ServiceAccount
+    name: router
+    namespace: openshift-ingress

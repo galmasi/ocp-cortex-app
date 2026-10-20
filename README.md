@@ -39,7 +39,7 @@ The browser talks only to the app's own origin. nginx is the backend:
 |---|---|
 | `/` | serves the SPA (deep links fall back to index.html) |
 | `/auth/exchange` | adds the OAuth client Basic-auth header (secret from `Secret cortex-oauth`, envsubst'ed into the config at startup) and forwards to the OAuth server's `/oauth/token` |
-| `/api`, `/apis` | proxies to `kubernetes.default.svc:6443`, forwarding the browser's Bearer token (TLS verified against the serviceaccount CA) |
+| `/api`, `/apis` | proxies to the apiserver (external endpoint on epoc000 — pods cannot reach ClusterIPs), forwarding the browser's Bearer token (TLS verified against the serviceaccount CA) |
 | `/ws/…` | exec/attach WebSockets; browsers cannot set headers on WebSocket, so the token rides as `?access_token=` and is moved into `Authorization` here. Prefix stripped. |
 
 ### Auth flow (authorization code)
@@ -85,7 +85,11 @@ on epoc000):
   `Secret cortex/cortex-oauth` with
   `OAUTH_BASIC = base64("cortex:<secret>")`
 - `Secret cortex/cortex-tls` — copy of the router's wildcard
-  cert (same procedure as `scripts/reconcile.sh`)
+  cert, used by the ROUTE (edge termination, `externalCertificate`);
+  TLS is terminated at the router and the pod serves plain HTTP
+  on 8080. http:80 redirects to https (like the console). The Role
+  `router-cert-reader` in `manifests/cortex.yaml` grants the router
+  SA read access to this secret.
 
 ## Troubleshooting
 
