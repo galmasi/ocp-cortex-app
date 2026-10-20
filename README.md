@@ -5,7 +5,7 @@ using the cluster's own IAM (the OpenShift OAuth server — the same
 login the console uses). Replaces the earlier OpenShift console
 dynamic plugin (retired; see git history).
 
-Served at `https://cortex-app.apps.epoc000.ete14.res.ibm.com`.
+Served at `https://cortex.apps.epoc000.ete14.res.ibm.com`.
 (`cortex.apps.<domain>` is the console itself on this cluster.)
 
 ## Layout
@@ -24,7 +24,7 @@ Served at `https://cortex-app.apps.epoc000.ete14.res.ibm.com`.
 ├── cortex-image/                # per-user instance pod image (owner-
 │   └── README.md                # maintained Dockerfile, not in repo)
 ├── manifests/
-│   ├── cortex-app.yaml          # ns, Deployment, Service, Route
+│   ├── cortex.yaml          # ns, Deployment, Service, Route
 │   ├── oauthclient.yaml         # OAuthClient template (cluster-admin)
 │   ├── deploy.yaml              # RETIRED plugin deploy (history)
 │   └── templates/cortex-instance.yaml  # per-user instance reference
@@ -45,7 +45,7 @@ The browser talks only to the app's own origin. nginx is the backend:
 ### Auth flow (authorization code)
 
 1. No/invalid token → "Log in with OpenShift" → redirect to
-   `oauth-openshift…/oauth/authorize` (`client_id=cortex-app`,
+   `oauth-openshift…/oauth/authorize` (`client_id=cortex`,
    `scope=user:full`, random `state`).
 2. Cluster login page (same IdP as the console) → back to
    `/auth/callback?code=…&state=…`.
@@ -55,7 +55,7 @@ The browser talks only to the app's own origin. nginx is the backend:
    is enforced by the API server**, not by the app.
 
 The client secret exists only in the `cortex-oauth` Secret and the
-`cortex-app` OAuthClient; never in git or the JS bundle.
+`cortex` OAuthClient; never in git or the JS bundle.
 
 ### Terminal
 
@@ -72,7 +72,7 @@ npm install
 npm run build                                   # -> cortex-app-image/dist
 podman build -t icr.io/vopo/cortex-app:0.1 cortex-app-image/
 podman push  icr.io/vopo/cortex-app:0.1
-oc rollout restart deployment/cortex-app -n cortex-app
+oc rollout restart deployment/cortex -n cortex
 ```
 
 Bump `"version"` in package.json on every deploy (shown on the page).
@@ -80,11 +80,11 @@ Bump `"version"` in package.json on every deploy (shown on the page).
 Cluster-side prerequisites (one-time, cluster-admin — already applied
 on epoc000):
 
-- `manifests/cortex-app.yaml` applied
-- `OAuthClient cortex-app` with a secret; matching
-  `Secret cortex-app/cortex-oauth` with
-  `OAUTH_BASIC = base64("cortex-app:<secret>")`
-- `Secret cortex-app/cortex-tls` — copy of the router's wildcard
+- `manifests/cortex.yaml` applied
+- `OAuthClient cortex` with a secret; matching
+  `Secret cortex/cortex-oauth` with
+  `OAUTH_BASIC = base64("cortex:<secret>")`
+- `Secret cortex/cortex-tls` — copy of the router's wildcard
   cert (same procedure as `scripts/reconcile.sh`)
 
 ## Troubleshooting

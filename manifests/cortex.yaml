@@ -1,22 +1,22 @@
 # Cortex standalone app deployment.
 #
-# Creates (namespace cortex-app):
+# Creates (namespace cortex):
 #   - ConfigMap cortex-nginx-template (nginx.conf.template — kept out of
 #     the image so config changes deploy without an image rebuild;
-#     cortex-app-image/nginx.conf.template in the repo is the source of
+#     cortex-image/nginx.conf.template in the repo is the source of
 #     truth for this block — keep them in sync)
-#   - Deployment cortex-app  (nginx: SPA + OAuth exchange + API/WS proxy)
-#   - Service cortex-app     (8443)
-#   - Route cortex-app       (cortex-app.apps.<domain>, passthrough)
+#   - Deployment cortex  (nginx: SPA + OAuth exchange + API/WS proxy)
+#   - Service cortex     (8443)
+#   - Route cortex       (cortex.apps.<domain>, passthrough)
 #
 # Prerequisites (NOT created here — cluster-admin / reconciler applies):
 #   - Secret cortex-tls: copy of the router's wildcard cert
 #     (see scripts/reconcile.sh for the per-user copies; same procedure)
-#   - Secret cortex-oauth: { OAUTH_BASIC: base64("cortex-app:<secret>") }
+#   - Secret cortex-oauth: { OAUTH_BASIC: base64("cortex:<secret>") }
 #     matching the OAuthClient's secret (manifests/oauthclient.yaml)
 #
 # Route host note: cortex.apps.<domain> is the OpenShift console itself
-# on this cluster, so the app uses cortex-app.apps.<domain>.
+# on this cluster, so the app uses cortex.apps.<domain>.
 #
 # Upstream note: pods on this cluster CANNOT reach service ClusterIPs
 # (verified empirically, Oct 2026) — the API and WS proxies target the
@@ -26,15 +26,15 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: cortex-app
+  name: cortex
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cortex-nginx-template
-  namespace: cortex-app
+  namespace: cortex
   labels:
-    app: cortex-app
+    app: cortex
 data:
   nginx.conf.template: |
     # nginx config for the Cortex standalone app. envsubst TEMPLATE —
@@ -140,19 +140,19 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cortex-app
-  namespace: cortex-app
+  name: cortex
+  namespace: cortex
   labels:
-    app: cortex-app
+    app: cortex
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: cortex-app
+      app: cortex
   template:
     metadata:
       labels:
-        app: cortex-app
+        app: cortex
     spec:
       containers:
         - name: nginx
@@ -161,7 +161,7 @@ spec:
           ports:
             - containerPort: 8443
           env:
-            # base64("cortex-app:<oauth client secret>") — from Secret
+            # base64("cortex:<oauth client secret>") — from Secret
             # cortex-oauth; injected into nginx.conf via envsubst.
             - name: OAUTH_BASIC
               valueFrom:
@@ -192,13 +192,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: cortex-app
-  namespace: cortex-app
+  name: cortex
+  namespace: cortex
   labels:
-    app: cortex-app
+    app: cortex
 spec:
   selector:
-    app: cortex-app
+    app: cortex
   ports:
     - port: 8443
       targetPort: 8443
@@ -206,17 +206,17 @@ spec:
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: cortex-app
-  namespace: cortex-app
+  name: cortex
+  namespace: cortex
   labels:
-    app: cortex-app
+    app: cortex
 spec:
   # Passthrough: this pod presents the cluster wildcard cert itself
   # (secret cortex-tls), so clients see the cluster's certificate.
-  host: cortex-app.apps.epoc000.ete14.res.ibm.com
+  host: cortex.apps.epoc000.ete14.res.ibm.com
   to:
     kind: Service
-    name: cortex-app
+    name: cortex
     weight: 100
   port:
     targetPort: 8443

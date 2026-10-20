@@ -2,8 +2,8 @@
 # OAuth server (the same IAM the OpenShift console uses).
 #
 # Cluster-scoped; apply as cluster-admin. The secret here must match
-# the OAUTH_BASIC value in Secret cortex-app/cortex-oauth:
-#   OAUTH_BASIC = base64("cortex-app:<secret>")
+# the OAUTH_BASIC value in Secret cortex/cortex-oauth:
+#   OAUTH_BASIC = base64("cortex:<secret>")
 #
 # grantMethod auto: first-time consent is granted automatically (the
 # app is ours; there is no third-party consent step).
@@ -25,8 +25,8 @@ objects:
   - apiVersion: oauth.openshift.io/v1
     kind: OAuthClient
     metadata:
-      name: cortex-app
+      name: cortex
     grantMethod: auto
     redirectURIs:
-      - https://cortex-app.apps.epoc000.ete14.res.ibm.com/auth/callback
+      - https://cortex.apps.epoc000.ete14.res.ibm.com/auth/callback
     secret: ${SECRET}

@@ -64,7 +64,7 @@ export const startLogin = (): void => {
     /* state check degrades to skipped */
   }
   const params = new URLSearchParams({
-    client_id: 'cortex-app',
+    client_id: 'cortex',
     response_type: 'code',
     redirect_uri: `${window.location.origin}/auth/callback`,
     scope: OAUTH_SCOPE,
