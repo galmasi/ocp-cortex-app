@@ -79,6 +79,18 @@ http {
       proxy_ssl_name api.epoc000.ete14.res.ibm.com;
     }
 
+    # --- Gateway admin (same-origin): SPA provision + heartbeat.
+    # Reached via the cortex-gw edge route, not the service ClusterIP
+    # (unreachable from pods on this cluster); the router presents the
+    # Let's Encrypt wildcard, which is not in the serviceaccount CA,
+    # so verification is off like the oauth exchange upstream.
+    location /__cortex/ {
+      proxy_pass https://cortex-gw.apps.epoc000.ete14.res.ibm.com;
+      proxy_set_header Authorization $http_authorization;
+      proxy_ssl_server_name on;
+      proxy_ssl_verify off;
+    }
+
     # --- exec/attach WebSockets: token from ?access_token= ---
     location /ws/ {
       proxy_pass https://api.epoc000.ete14.res.ibm.com:6443/;

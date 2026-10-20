@@ -1,0 +1,153 @@
+# Shared cortex gateway — see DESIGN.md "Part 2 — gateway".
+#
+# One deployment per cluster: terminates TLS for every per-user proxy
+# route (SNI demux), wakes reaped engines on connect, reaps idle ones,
+# and provisions namespaces for first-time users (/__cortex/provision,
+# reached same-origin through the app's nginx via the cortex-gw route).
+#
+# The wildcard cert comes from the existing Secret cortex/cortex-tls
+# (the same copy the edge route uses).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cortex-gateway
+  namespace: cortex
+  labels: { app: cortex-gateway }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cortex-gateway
+rules:
+  # Provision first-time users: namespace + their Role/RoleBinding.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get"]
+  # Ensure / wake / reap the per-user instances. This must be a
+  # SUPERSET of the user Role (mirrored in userRBAC() in the gateway):
+  # RBAC forbids granting permissions the granter does not hold, and
+  # provision creates that Role on the user's behalf.
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services", "endpoints"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # Per-user routes carry deterministic custom hosts
+  # (cortex-<user>[-r].apps…); setting spec.host needs this.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes/custom-host"]
+    verbs: ["create"]
+  # Per-user Endpoints point at the gateway pods in the cortex
+  # namespace (cross-namespace addresses are restricted by default).
+  - apiGroups: [""]
+    resources: ["endpoints/restricted"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cortex-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cortex-gateway
+subjects:
+  - kind: ServiceAccount
+    name: cortex-gateway
+    namespace: cortex
+---
+# TLS front: every per-user Route's selector-less Service/Endpoints
+# points here (ClusterIP), SNI names the user.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cortex-gateway
+  namespace: cortex
+  labels: { app: cortex-gateway }
+spec:
+  selector: { app: cortex-gateway }
+  ports:
+    - { name: proxy, port: 13000, targetPort: 13000 }
+---
+# Admin surface (/__cortex/heartbeat|provision|status) for the SPA,
+# same-origin through the app's nginx. Not for user routes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cortex-gateway-admin
+  namespace: cortex
+  labels: { app: cortex-gateway }
+spec:
+  selector: { app: cortex-gateway }
+  ports:
+    - { name: admin, port: 13002, targetPort: 13002 }
+---
+# The app's nginx reaches the admin surface through this edge route —
+# pods on this cluster cannot reach service ClusterIPs, but they can
+# reach *.apps.<domain> through the router (as the oauth exchange does).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cortex-gw
+  namespace: cortex
+  labels: { app: cortex-gateway }
+spec:
+  host: cortex-gw.apps.epoc000.ete14.res.ibm.com
+  to: { kind: Service, name: cortex-gateway-admin, weight: 100 }
+  port: { targetPort: admin }
+  tls: { termination: edge }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cortex-gateway
+  namespace: cortex
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: cortex-gateway }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cortex-gateway
+  namespace: cortex
+  labels: { app: cortex-gateway }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: cortex-gateway } }
+  template:
+    metadata:
+      labels: { app: cortex-gateway }
+    spec:
+      serviceAccountName: cortex-gateway
+      containers:
+        - name: gateway
+          image: icr.io/vopo/cortex-gateway:0.2
+          args:
+            - -apps-domain=apps.epoc000.ete14.res.ibm.com
+            - -idle-timeout=30m
+          ports:
+            - { containerPort: 13000, name: proxy }
+            - { containerPort: 13002, name: admin }
+          volumeMounts:
+            - { name: tls, mountPath: /cert, readOnly: true }
+          readinessProbe: { tcpSocket: { port: 13000 } }
+          livenessProbe: { tcpSocket: { port: 13000 } }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }
+      volumes:
+        - name: tls
+          secret: { secretName: cortex-tls }

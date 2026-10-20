@@ -21,14 +21,20 @@ Served at `https://cortex.apps.epoc000.ete14.res.ibm.com`.
 │   ├── Dockerfile               # nginx-unprivileged, envsubst template
 │   ├── nginx.conf.template      # SPA + OAuth exchange + API/WS proxy
 │   └── dist/                    # webpack output lands here
+├── cortex-gateway/              # shared gateway (see DESIGN.md Part 2):
+│   ├── main.go                  # SNI demux + wake/reap + provision
+│   └── Dockerfile               # static Go binary on scratch
 ├── cortex-image/                # per-user instance pod image (owner-
 │   └── README.md                # maintained Dockerfile, not in repo)
 ├── manifests/
 │   ├── cortex.yaml          # ns, Deployment, Service, Route
+│   ├── gateway.yaml             # gateway: SA, ClusterRole, Deployment,
+│   │                            # Services, cortex-gw route, PDB
 │   ├── oauthclient.yaml         # OAuthClient template (cluster-admin)
 │   ├── deploy.yaml              # RETIRED plugin deploy (history)
 │   └── templates/cortex-instance.yaml  # per-user instance reference
-└── scripts/reconcile.sh         # per-user ns + RBAC + cert copies
+└── scripts/reconcile.sh         # legacy eager reconciler (superseded
+                                 # by the gateway's provision endpoint)
 ```
 
 ## Architecture
@@ -40,6 +46,7 @@ The browser talks only to the app's own origin. nginx is the backend:
 | `/` | serves the SPA (deep links fall back to index.html) |
 | `/auth/exchange` | adds the OAuth client Basic-auth header (secret from `Secret cortex-oauth`, envsubst'ed into the config at startup) and forwards to the OAuth server's `/oauth/token` |
 | `/api`, `/apis` | proxies to the apiserver (external endpoint on epoc000 — pods cannot reach ClusterIPs), forwarding the browser's Bearer token (TLS verified against the serviceaccount CA) |
+| `/__cortex/` | proxies to the **cortex gateway** admin surface (via the `cortex-gw` edge route): SPA instance provisioning (`POST /__cortex/provision`) and the per-minute keep-alive heartbeat that drives the gateway's idle reaper |
 | `/ws/…` | exec/attach WebSockets; browsers cannot set headers on WebSocket, so the token rides as `?access_token=` and is moved into `Authorization` here. Prefix stripped. |
 
 ### Auth flow (authorization code)
@@ -65,6 +72,16 @@ the WS exec path (PTY stays 0x0), so resizing is driven by a second
 exec running `tmux resize-window` plus `stty` on each client tty —
 see the comments in `CortexTerminal.tsx`.
 
+### Instance lifecycle (gateway)
+
+The shared `cortex-gateway` (DESIGN.md Part 2) owns per-user instance
+lifecycle: it terminates TLS for every per-user proxy route, provisions
+`cortex-<user>` namespaces on first login, wakes reaped engines on any
+proxy connection (inside the TLS handshake), and scales engines to 0
+after 30 min with neither proxy traffic nor an open console page. The
+SPA just calls `POST /__cortex/provision` once per login and then
+heartbeats every minute while the page is open.
+
 ## Deploy
 
 ```sh
@@ -72,6 +89,9 @@ npm install
 npm run build                                   # -> cortex-app-image/dist
 podman build -t icr.io/vopo/cortex-app:0.1 cortex-app-image/
 podman push  icr.io/vopo/cortex-app:0.1
+podman build -t icr.io/vopo/cortex-gateway:0.2 cortex-gateway/
+podman push  icr.io/vopo/cortex-gateway:0.2
+oc apply -f manifests/gateway.yaml              # cluster-admin, once
 oc rollout restart deployment/cortex -n cortex
 ```
 

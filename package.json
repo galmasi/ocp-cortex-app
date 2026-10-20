@@ -1,6 +1,6 @@
 {
   "name": "ocp-cortex-app",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Cortex standalone app (per-user service control surface, OpenShift IAM)",
   "private": true,
   "scripts": {
