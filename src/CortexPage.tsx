@@ -45,6 +45,10 @@ const BACKEND_CHOICES = [
     value: 'https://ete-litellm.ai-models.vpc.res.ibm.com',
     label: 'External LiteLLM gateway (vpc)',
   },
+  {
+    value: 'https://litellm.cb.ete.res.ibm.com',
+    label: 'Curvebender',
+  },
 ];
 const BACKEND_RE = /reverse_proxy_backend:\s*"([^"]*)"/;
 
