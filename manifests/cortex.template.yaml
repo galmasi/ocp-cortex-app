@@ -1,4 +1,6 @@
-# Cortex standalone app deployment.
+# Cortex standalone app deployment — TEMPLATE, rendered by
+# scripts/deploy.sh (__APPS_DOMAIN__, __API_UPSTREAM__[:__API_UPSTREAM_PORT__],
+# __APP_IMAGE__). Rendered output lands in manifests/rendered/.
 #
 # Creates (namespace cortex):
 #   - ConfigMap cortex-nginx-template (nginx.conf.template — kept out of
@@ -9,20 +11,20 @@
 #   - Service cortex     (8080, plain HTTP)
 #   - Role/RoleBinding router-cert-reader (lets the router SA read the
 #     cortex-tls secret for the edge route's externalCertificate)
-#   - Route cortex       (cortex.apps.<domain>, edge termination with the
+#   - Route cortex       (cortex.<domain>, edge termination with the
 #     cluster wildcard cert, http:80 -> https redirect)
 #
-# Prerequisites (NOT created here — cluster-admin / reconciler applies):
+# Prerequisites (scripts/deploy.sh creates these if missing):
 #   - Secret cortex-oauth: OAUTH_BASIC = base64("cortex:<secret>")
 #     matching the OAuthClient's secret (manifests/oauthclient.yaml)
 #   - Secret cortex-tls: copy of the router's wildcard cert — used by the
 #     ROUTE (externalCertificate); TLS is terminated at the router and
 #     the pod serves plain HTTP on 8080.
 #
-# Upstream note: pods on this cluster CANNOT reach service ClusterIPs
-# (verified empirically, Oct 2026) — the API and WS proxies target the
-# external apiserver endpoint api.<domain>:6443 instead, which is
-# reachable in-cluster and presents a cert signed by the same CA.
+# API upstream: the in-cluster service (kubernetes.default.svc:443) by
+# default; scripts/deploy.sh --external-api targets the external
+# endpoint instead, for clusters whose pods cannot reach service
+# ClusterIPs (epoc000 cannot — verified empirically, Oct 2026).
 ---
 apiVersion: v1
 kind: Namespace
@@ -95,7 +97,7 @@ data:
 
         # --- OAuth code exchange: the only place the client secret lives ---
         location = /auth/exchange {
-          proxy_pass https://oauth-openshift.apps.epoc000.ete14.res.ibm.com/oauth/token;
+          proxy_pass https://oauth-openshift.__APPS_DOMAIN__/oauth/token;
           proxy_set_header Authorization "Basic ${OAUTH_BASIC}";
           proxy_set_header Content-Type "application/x-www-form-urlencoded";
           proxy_ssl_server_name on;
@@ -103,20 +105,20 @@ data:
 
         # --- Kubernetes REST: forward the browser's Bearer token as-is ---
         location /api/ {
-          proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
+          proxy_pass https://__API_UPSTREAM__:__API_UPSTREAM_PORT__;
           proxy_set_header Authorization $http_authorization;
           proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
           proxy_ssl_verify on;
           proxy_ssl_server_name on;
-          proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+          proxy_ssl_name __API_UPSTREAM__;
         }
         location /apis/ {
-          proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
+          proxy_pass https://__API_UPSTREAM__:__API_UPSTREAM_PORT__;
           proxy_set_header Authorization $http_authorization;
           proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
           proxy_ssl_verify on;
           proxy_ssl_server_name on;
-          proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+          proxy_ssl_name __API_UPSTREAM__;
         }
 
         # --- Gateway admin (same-origin): SPA provision + heartbeat.
@@ -126,7 +128,7 @@ data:
         # serviceaccount CA, so verification is off like the oauth
         # exchange upstream.
         location /__cortex/ {
-          proxy_pass https://cortex-gw.apps.epoc000.ete14.res.ibm.com;
+          proxy_pass https://cortex-gw.__APPS_DOMAIN__;
           proxy_set_header Authorization $http_authorization;
           proxy_ssl_server_name on;
           proxy_ssl_verify off;
@@ -134,7 +136,7 @@ data:
 
         # --- exec/attach WebSockets: token from ?access_token= ---
         location /ws/ {
-          proxy_pass https://api.epoc000.ete14.res.ibm.com:6443/;
+          proxy_pass https://__API_UPSTREAM__:__API_UPSTREAM_PORT__/;
           proxy_set_header Authorization "Bearer $arg_access_token";
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection "upgrade";
@@ -142,7 +144,7 @@ data:
           proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
           proxy_ssl_verify on;
           proxy_ssl_server_name on;
-          proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+          proxy_ssl_name __API_UPSTREAM__;
           proxy_read_timeout 3600s;
           proxy_send_timeout 3600s;
           # keep tokens out of the access log
@@ -171,7 +173,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: ghcr.io/galmasi/cortex-app:0.13.0
+          image: __APP_IMAGE__
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -222,7 +224,7 @@ metadata:
   labels:
     app: cortex
 spec:
-  host: cortex.apps.epoc000.ete14.res.ibm.com
+  host: cortex.__APPS_DOMAIN__
   to:
     kind: Service
     name: cortex

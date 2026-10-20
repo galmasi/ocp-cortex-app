@@ -22,7 +22,12 @@ declare const CORTEX_PLUGIN_VERSION: string | undefined;
 const APP_VERSION =
   typeof CORTEX_PLUGIN_VERSION !== 'undefined' ? CORTEX_PLUGIN_VERSION : '?';
 
-const CLUSTER_APPS_DOMAIN = 'apps.epoc000.ete14.res.ibm.com';
+// Derived from our own origin (we are served at cortex.<domain>) —
+// no cluster name is baked into the bundle.
+const CLUSTER_APPS_DOMAIN = window.location.hostname
+  .split('.')
+  .slice(1)
+  .join('.');
 /** "Page open" counts as in use — the gateway's idle reaper keeps the
  * instance alive while these arrive (and reaps it when they stop). */
 const HEARTBEAT_MS = 60_000;

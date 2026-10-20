@@ -16,8 +16,14 @@
 
 const TOKEN_KEY = 'cortex.access_token';
 
+/** The cluster's apps domain, derived from our own origin: we are
+ * served at cortex.apps.<domain>, so everything after the first label
+ * is the domain — nothing cluster-specific is baked into the bundle. */
+const appsDomain = (): string =>
+  window.location.hostname.split('.').slice(1).join('.');
+
 export const OAUTH_AUTHORIZE_URL =
-  'https://oauth-openshift.apps.epoc000.ete14.res.ibm.com/oauth/authorize';
+  `https://oauth-openshift.${appsDomain()}/oauth/authorize`;
 export const OAUTH_SCOPE = 'user:full';
 
 /** The cluster user behind the current token (from the API server). */

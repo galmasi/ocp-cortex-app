@@ -49,7 +49,7 @@ import (
 )
 
 var (
-	appsDomain  = flag.String("apps-domain", "", "cluster apps domain; route hosts are cortex-<user>[-r].<domain> (required)")
+	appsDomain  = flag.String("apps-domain", "", "cluster apps domain; route hosts are cortex-<user>[-r].<domain> (default: discovered from the cluster's ingress config)")
 	tlsAddr     = flag.String("tls-addr", ":13000", "TLS listener: SNI demux + proxy traffic")
 	adminAddr   = flag.String("admin-addr", ":13002", "plain HTTP listener for /__cortex/*")
 	idleTimeout = flag.Duration("idle-timeout", 30*time.Minute, "scale an engine to 0 after this long without traffic or heartbeat")
@@ -941,14 +941,39 @@ func (g *gateway) handleStatus(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // main
 
+// discoverAppsDomain reads the cluster's ingress config — the same
+// place `oc get ingress.config cluster` reports. Used when
+// -apps-domain is not given, so the gateway is cluster-agnostic by
+// default.
+func discoverAppsDomain(k *kube) (string, error) {
+	var cfg struct {
+		Spec struct {
+			Domain string `json:"domain"`
+		} `json:"spec"`
+	}
+	code, body, err := k.req("GET", "/apis/config.openshift.io/v1/ingresses/cluster", nil, "")
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", fmt.Errorf("ingress.config/cluster: %d %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &cfg); err != nil || cfg.Spec.Domain == "" {
+		return "", fmt.Errorf("ingress.config/cluster: no spec.domain (%s)", body)
+	}
+	return cfg.Spec.Domain, nil
+}
+
 func main() {
 	flag.Parse()
-	if *appsDomain == "" {
-		log.Fatal("-apps-domain is required")
-	}
 	k, err := newKube()
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *appsDomain == "" {
+		if *appsDomain, err = discoverAppsDomain(k); err != nil {
+			log.Fatalf("-apps-domain not given and discovery failed: %v", err)
+		}
 	}
 	cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
 	if err != nil {

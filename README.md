@@ -90,13 +90,28 @@ Images live on ghcr (public); each image directory has a Makefile:
 npm install                                     # once
 make -C cortex-app-image publish                 # builds SPA + image, pushes
 make -C cortex-gateway publish                   # builds + pushes gateway
-oc apply -k manifests/                           # cluster-admin; kustomize
-                                                 # lets image refs be overridden
+make -C cortex-pod-image publish                 # engine (cortex-binaries)
 ```
 
 All three images are tagged from `package.json`'s `"version"` — bump it
 every deploy (it shows on the page) and `make publish` in each image
 directory; a deployed cluster is described by one version string.
+
+Deploying to a cluster is cluster-agnostic — `scripts/deploy.sh`
+discovers the apps domain from the cluster's ingress config, creates
+the OAuthClient and both secrets if missing, renders the manifest
+templates (`manifests/*.template.yaml` — never edit
+`manifests/rendered/`), and applies everything:
+
+```sh
+oc login <cluster>            # as cluster-admin
+scripts/deploy.sh             # add --external-api only if pods cannot
+                              # reach service ClusterIPs (epoc000-style)
+```
+
+Nothing cluster-specific is baked into the SPA (it derives the OAuth
+server from its own origin) or the gateway (it discovers the apps
+domain at startup; `-apps-domain` overrides).
 
 Cluster-side prerequisites (one-time, cluster-admin — already applied
 on epoc000):

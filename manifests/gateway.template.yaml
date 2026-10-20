@@ -1,5 +1,8 @@
 # Shared cortex gateway — see DESIGN.md "Part 2 — gateway".
 #
+#
+# TEMPLATE, rendered by scripts/deploy.sh (__APPS_DOMAIN__,
+# __GATEWAY_IMAGE__); rendered output lands in manifests/rendered/.
 # One deployment per cluster: terminates TLS for every per-user proxy
 # route (SNI demux), wakes reaped engines on connect, reaps idle ones,
 # and provisions namespaces for first-time users (/__cortex/provision,
@@ -53,6 +56,11 @@ rules:
   - apiGroups: [""]
     resources: ["endpoints/restricted"]
     verbs: ["create"]
+  # Discovering the cluster's apps domain at startup (equivalent of
+  # `oc get ingress.config cluster`) when -apps-domain is not given.
+  - apiGroups: ["config.openshift.io"]
+    resources: ["ingresses"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -103,7 +111,7 @@ metadata:
   namespace: cortex
   labels: { app: cortex-gateway }
 spec:
-  host: cortex-gw.apps.epoc000.ete14.res.ibm.com
+  host: cortex-gw.__APPS_DOMAIN__
   to: { kind: Service, name: cortex-gateway-admin, weight: 100 }
   port: { targetPort: admin }
   tls: { termination: edge }
@@ -134,9 +142,10 @@ spec:
       serviceAccountName: cortex-gateway
       containers:
         - name: gateway
-          image: ghcr.io/galmasi/cortex-gateway:0.12.0
+          image: __GATEWAY_IMAGE__
+          # apps domain is discovered from the cluster's ingress config
+          # (-apps-domain overrides); idle-timeout is the reaper window
           args:
-            - -apps-domain=apps.epoc000.ete14.res.ibm.com
             - -idle-timeout=30m
           ports:
             - { containerPort: 13000, name: proxy }

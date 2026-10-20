@@ -10,7 +10,6 @@
 #
 # Apply with the secret filled in, e.g.:
 #   oc process -f oauthclient.yaml -p SECRET=... | oc apply -f -
-# or apply the pre-created one on epoc000 (the secret is only in the
 # cluster Secret, never in git).
 ---
 apiVersion: template.openshift.io/v1
@@ -18,6 +17,9 @@ kind: Template
 metadata:
   name: cortex-oauthclient
 parameters:
+  - name: DOMAIN
+    displayName: Cluster apps domain
+    required: true
   - name: SECRET
     displayName: OAuth client secret
     required: true
@@ -28,5 +30,5 @@ objects:
       name: cortex
     grantMethod: auto
     redirectURIs:
-      - https://cortex.apps.epoc000.ete14.res.ibm.com/auth/callback
+      - https://cortex.${DOMAIN}/auth/callback
     secret: ${SECRET}

@@ -55,7 +55,7 @@ http {
 
     # --- OAuth code exchange: the only place the client secret lives ---
     location = /auth/exchange {
-      proxy_pass https://oauth-openshift.apps.epoc000.ete14.res.ibm.com/oauth/token;
+      proxy_pass https://oauth-openshift.__APPS_DOMAIN__/oauth/token;
       proxy_set_header Authorization "Basic ${OAUTH_BASIC}";
       proxy_set_header Content-Type "application/x-www-form-urlencoded";
       proxy_ssl_server_name on;
@@ -63,20 +63,20 @@ http {
 
     # --- Kubernetes REST: forward the browser's Bearer token as-is ---
     location /api/ {
-      proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
+      proxy_pass https://__API_UPSTREAM__:__API_UPSTREAM_PORT__;
       proxy_set_header Authorization $http_authorization;
       proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
       proxy_ssl_verify on;
       proxy_ssl_server_name on;
-      proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+      proxy_ssl_name __API_UPSTREAM__;
     }
     location /apis/ {
-      proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
+      proxy_pass https://__API_UPSTREAM__:__API_UPSTREAM_PORT__;
       proxy_set_header Authorization $http_authorization;
       proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
       proxy_ssl_verify on;
       proxy_ssl_server_name on;
-      proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+      proxy_ssl_name __API_UPSTREAM__;
     }
 
     # --- Gateway admin (same-origin): SPA provision + heartbeat.
@@ -85,7 +85,7 @@ http {
     # Let's Encrypt wildcard, which is not in the serviceaccount CA,
     # so verification is off like the oauth exchange upstream.
     location /__cortex/ {
-      proxy_pass https://cortex-gw.apps.epoc000.ete14.res.ibm.com;
+      proxy_pass https://cortex-gw.__APPS_DOMAIN__;
       proxy_set_header Authorization $http_authorization;
       proxy_ssl_server_name on;
       proxy_ssl_verify off;
@@ -93,7 +93,7 @@ http {
 
     # --- exec/attach WebSockets: token from ?access_token= ---
     location /ws/ {
-      proxy_pass https://api.epoc000.ete14.res.ibm.com:6443/;
+      proxy_pass https://__API_UPSTREAM__:__API_UPSTREAM_PORT__/;
       proxy_set_header Authorization "Bearer $arg_access_token";
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
@@ -101,7 +101,7 @@ http {
       proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
       proxy_ssl_verify on;
       proxy_ssl_server_name on;
-      proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+      proxy_ssl_name __API_UPSTREAM__;
       proxy_read_timeout 3600s;
       proxy_send_timeout 3600s;
       # keep tokens out of the access log
