@@ -1,0 +1,29 @@
+# Kustomize overlay for the cluster-side manifests — lets image
+# locations be overridden without editing the YAML (e.g. a fork or a
+# different registry):
+#
+#   oc apply -k manifests/
+#
+# and to point at a different registry/branch, copy this file to an
+# overlay with `newTag`/`newName` entries (kustomize images), e.g.:
+#
+#   apiVersion: kustomize.config.k8s.io/v1beta1
+#   kind: Kustomization
+#   resources:
+#     - ../manifests          # or a git URL of this repo
+#   images:
+#     - name: ghcr.io/galmasi/cortex-app
+#       newName: example.com/team/cortex-app
+#       newTag: "1.0"
+#
+# (envsubst-style templating is deliberately NOT used: cortex.yaml
+# embeds the nginx ${OAUTH_BASIC} template, which must survive as-is.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cortex.yaml
+  - gateway.yaml
+images:
+  - name: ghcr.io/galmasi/cortex-app
+  - name: ghcr.io/galmasi/cortex-gateway
+  - name: ghcr.io/galmasi/cortex

@@ -66,7 +66,7 @@ const (
 	                      // connections as self-referential)
 	engineTransparentPort = 18082 // transparent_proxy_addr (interception-only listener)
 	sessionAPIPort = 19095
-	cortexImage   = "icr.io/vopo/cortex:latest"
+	cortexImage   = "ghcr.io/galmasi/cortex-binaries:latest"
 
 	gatewayNS        = "cortex"
 	gatewaySvcName   = "cortex-gateway" // our own Service; ClusterIP is pinned into every user's Endpoints

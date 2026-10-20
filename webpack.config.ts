@@ -36,6 +36,12 @@ const config: Configuration = {
         test: /\.css$/,
         use: ['style-loader', 'css-loader'],
       },
+      {
+        // Static images (logo etc.): emitted as content-hashed assets in
+        // dist/ next to the bundle.
+        test: /\.png$/,
+        type: 'asset/resource',
+      },
     ],
   },
   resolve: {

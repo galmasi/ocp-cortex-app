@@ -3,8 +3,19 @@
 The GUI is basically usable now (login, instance ensure/start, live
 terminal). Remaining work, roughly in no particular order:
 
-- **Login screen** — the current one is very simple; needs a proper
-  design. A **logo** needs to be produced for it.
+- **TLS trust for in-engine clients (serious, not urgent)** — the
+  gateway serves the router's Let's Encrypt wildcard cert on the
+  per-user proxy routes, and browsers are happy, but agents running
+  INSIDE the engine (e.g. Claude) apparently do not trust it. Unclear
+  yet whether it's the LE chain served without intermediates, a
+  missing system CA store in the engine image (Ubuntu 26.04 should
+  have ca-certificates — verify it's installed), or SNI/proxy
+  specifics. Reproduce with curl inside the engine pod, then fix
+  (serve the full chain from `cortex-tls`, or install
+  ca-certificates in the image).
+
+- **Login screen** — logo (rossoctl.png) and version are on the page
+  now; a proper overall design pass is still wanted.
 - **Image naming** — app image is still `icr.io/vopo/cortex-app:0.1`
   (renaming it to `cortex` would collide with the per-user engine
   image `icr.io/vopo/cortex:latest`); settle together with the ghcr
@@ -12,7 +23,11 @@ terminal). Remaining work, roughly in no particular order:
 - **Cortex reverse proxy routing** — DONE: the gateway serves the
   reverse proxy on `cortex-<user>-r.<domain>` (SNI `-r` suffix) and
   tunnels to the engine's own reverse-proxy listener (:8080).
-- **Container images from ghcr** instead of icr.io.
+- **Container images from ghcr** instead of icr.io — DONE: all three
+  images are on `ghcr.io/galmasi/...` (public packages; per-image
+  Makefiles for build/publish; `oc apply -k manifests/` deploys, with
+  image overrides via kustomize). Remaining icr references are in
+  retired/reference manifests only.
 - **Repository template** — there is a repository template we need to
   adhere to eventually.
 - **Cortex pod image** — fill in the code to generate it

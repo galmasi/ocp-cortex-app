@@ -134,7 +134,7 @@ spec:
       serviceAccountName: cortex-gateway
       containers:
         - name: gateway
-          image: icr.io/vopo/cortex-gateway:0.2
+          image: ghcr.io/galmasi/cortex-gateway:0.4
           args:
             - -apps-domain=apps.epoc000.ete14.res.ibm.com
             - -idle-timeout=30m

@@ -1,0 +1,3 @@
+[submodule "cortex-pod-image/cortex"]
+	path = cortex-pod-image/cortex
+	url = https://github.com/rossoctl/cortex.git

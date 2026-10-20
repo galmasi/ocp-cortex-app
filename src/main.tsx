@@ -12,7 +12,18 @@ import CortexPage from './CortexPage';
 import { getStoredToken, handleCallback, startLogin, logout } from './auth';
 import { getCurrentUser, ApiUnauthorizedError } from './api';
 import { ClusterUser } from './auth';
+import logoUrl from './rossoctl.png';
+// PatternFly component styles — without this, Buttons/Cards/etc. render
+// unstyled (white, flat).
+import '@patternfly/react-core/dist/styles/base.css';
 import './app.css';
+
+// Injected at build time by DefinePlugin from package.json's version
+// (same as on CortexPage — shown pre-login so the deployed version is
+// visible without logging in).
+declare const CORTEX_PLUGIN_VERSION: string | undefined;
+const APP_VERSION =
+  typeof CORTEX_PLUGIN_VERSION !== 'undefined' ? CORTEX_PLUGIN_VERSION : '?';
 
 type AuthPhase =
   | { kind: 'boot' }
@@ -66,16 +77,38 @@ const App: React.FC = () => {
         </PageSection>
       )}
       {phase.kind === 'logged-out' && (
-        <PageSection>
-          <Card>
-            <CardBody>
-              <p>Sign in with your cluster credentials to use Cortex.</p>
-              <Button variant="primary" onClick={() => startLogin()}>
-                Log in with OpenShift
-              </Button>
-            </CardBody>
-          </Card>
-        </PageSection>
+        <>
+          {/* Logo spans the top of the page, centered, scaling with the
+              viewport (up to its natural size). */}
+          <PageSection>
+            <img
+              src={logoUrl}
+              alt="Cortex"
+              style={{
+                display: 'block',
+                margin: '0 auto',
+                width: 'min(100%, 720px)',
+              }}
+            />
+          </PageSection>
+          <PageSection>
+            <Card>
+              <CardBody>
+                <p>Sign in with your cluster credentials to use Cortex.</p>
+                <Button
+                  variant="primary"
+                  style={{ width: '100%', marginTop: '8px' }}
+                  onClick={() => startLogin()}
+                >
+                  Log in with OpenShift
+                </Button>
+                <p style={{ marginTop: '16px', color: 'var(--pf-v5-global--Color--200)' }}>
+                  v{APP_VERSION}
+                </p>
+              </CardBody>
+            </Card>
+          </PageSection>
+        </>
       )}
       {phase.kind === 'error' && (
         <PageSection>

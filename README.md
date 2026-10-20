@@ -84,18 +84,19 @@ heartbeats every minute while the page is open.
 
 ## Deploy
 
+Images live on ghcr (public); each image directory has a Makefile:
+
 ```sh
-npm install
-npm run build                                   # -> cortex-app-image/dist
-podman build -t icr.io/vopo/cortex-app:0.1 cortex-app-image/
-podman push  icr.io/vopo/cortex-app:0.1
-podman build -t icr.io/vopo/cortex-gateway:0.2 cortex-gateway/
-podman push  icr.io/vopo/cortex-gateway:0.2
-oc apply -f manifests/gateway.yaml              # cluster-admin, once
-oc rollout restart deployment/cortex -n cortex
+npm install                                     # once
+make -C cortex-app-image publish                 # builds SPA + image, pushes
+make -C cortex-gateway publish                   # builds + pushes gateway
+oc apply -k manifests/                           # cluster-admin; kustomize
+                                                 # lets image refs be overridden
 ```
 
-Bump `"version"` in package.json on every deploy (shown on the page).
+The app image tag tracks `package.json`'s `"version"` (bump it every
+deploy — it shows on the page); the gateway tag is `TAG` in
+`cortex-gateway/Makefile`.
 
 Cluster-side prerequisites (one-time, cluster-admin — already applied
 on epoc000):
