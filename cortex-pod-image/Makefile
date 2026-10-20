@@ -1,5 +1,7 @@
 CORTEX_IMAGE=ghcr.io/galmasi/cortex-binaries
-CORTEX_TAG=0.1
+# Tag comes from package.json at the repo root — the SAME version
+# numbers every published image (app, gateway, engine).
+CORTEX_TAG=$(shell awk -F'"' '/"version"/ {print $$4}' ../package.json)
 
 all: build
 

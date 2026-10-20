@@ -94,9 +94,9 @@ oc apply -k manifests/                           # cluster-admin; kustomize
                                                  # lets image refs be overridden
 ```
 
-The app image tag tracks `package.json`'s `"version"` (bump it every
-deploy — it shows on the page); the gateway tag is `TAG` in
-`cortex-gateway/Makefile`.
+All three images are tagged from `package.json`'s `"version"` — bump it
+every deploy (it shows on the page) and `make publish` in each image
+directory; a deployed cluster is described by one version string.
 
 Cluster-side prerequisites (one-time, cluster-admin — already applied
 on epoc000):
