@@ -4,9 +4,14 @@ import {
   Title,
   Card,
   CardBody,
+  CardTitle,
   Spinner,
+  FormSelect,
+  FormSelectOption,
+  TextInput,
+  Button,
 } from '@patternfly/react-core';
-import { apiFetch, ApiUnauthorizedError } from './api';
+import { apiFetch, apiPatch, ApiUnauthorizedError } from './api';
 import { ClusterUser, logout } from './auth';
 import CortexTerminal from './CortexTerminal';
 import StageErrorBoundary from './StageErrorBoundary';
@@ -21,6 +26,22 @@ const CLUSTER_APPS_DOMAIN = 'apps.epoc000.ete14.res.ibm.com';
 /** "Page open" counts as in use — the gateway's idle reaper keeps the
  * instance alive while these arrive (and reaps it when they stop). */
 const HEARTBEAT_MS = 60_000;
+
+/** Reverse proxy backend choices (the engine's cortex.yaml
+ * `reverse_proxy_backend`). The engine reads its config at startup, so
+ * a change rewrites the ConfigMap and restarts the Deployment. */
+const CUSTOM_BACKEND = '__custom__';
+const BACKEND_CHOICES = [
+  {
+    value: 'https://ete-litellm.ai-models.vpc-int.res.ibm.com',
+    label: 'Internal LiteLLM gateway (vpc-int)',
+  },
+  {
+    value: 'https://ete-litellm.ai-models.vpc.res.ibm.com',
+    label: 'External LiteLLM gateway (vpc)',
+  },
+];
+const BACKEND_RE = /reverse_proxy_backend:\s*"([^"]*)"/;
 
 interface Metadata {
   name?: string;
@@ -73,6 +94,14 @@ const CortexPage: React.FC<CortexPageProps> = ({ token, user, onSessionExpired }
   const [readyPod, setReadyPod] = React.useState<string | null>(null);
   const [waitingReason, setWaitingReason] = React.useState('');
   const provisionedRef = React.useRef<string | null>(null);
+
+  // Reverse proxy backend: current value from the ConfigMap, the
+  // FormSelect's value ('__custom__' when typing), and save state.
+  const [backend, setBackend] = React.useState<string | null>(null);
+  const [backendChoice, setBackendChoice] = React.useState<string>('');
+  const [customBackend, setCustomBackend] = React.useState('');
+  const [backendMsg, setBackendMsg] = React.useState('');
+  const [savingBackend, setSavingBackend] = React.useState(false);
 
   const userName = user.name;
   const ns = userName ? `cortex-${sanitize(userName)}` : '';
@@ -185,6 +214,94 @@ const CortexPage: React.FC<CortexPageProps> = ({ token, user, onSessionExpired }
 
   const routeHost = userName ? `cortex-${sanitize(userName)}.${CLUSTER_APPS_DOMAIN}` : '';
 
+  // Load the current reverse proxy backend from the instance's
+  // ConfigMap once the namespace exists (provisioned above).
+  React.useEffect(() => {
+    if (!ns || phase === 'checking') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cm = await guarded(() =>
+          apiFetch<{ data?: Record<string, string> }>(
+            token,
+            `/api/v1/namespaces/${ns}/configmaps/cortex-config`,
+          ),
+        );
+        const yaml = cm.data?.['cortex.yaml'] || '';
+        const m = yaml.match(BACKEND_RE);
+        if (!cancelled && m) {
+          setBackend(m[1]);
+          setBackendChoice(
+            BACKEND_CHOICES.some((c) => c.value === m[1]) ? m[1] : CUSTOM_BACKEND,
+          );
+          setCustomBackend(
+            BACKEND_CHOICES.some((c) => c.value === m[1]) ? '' : m[1],
+          );
+        }
+      } catch (e) {
+        if (e instanceof ApiUnauthorizedError) return;
+        // Non-fatal: the selector just starts empty.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ns, phase, token]);
+
+  /** Rewrite `reverse_proxy_backend` in the ConfigMap and restart the
+   * engine so it picks the new value up (it reads config at startup).
+   * The user's own token is authorized for both operations. */
+  const saveBackend = async (value: string) => {
+    if (!ns || !value) return;
+    setSavingBackend(true);
+    setBackendMsg('');
+    try {
+      const cmPath = `/api/v1/namespaces/${ns}/configmaps/cortex-config`;
+      const cm = await guarded(() =>
+        apiFetch<{ data?: Record<string, string> }>(token, cmPath),
+      );
+      const yaml = cm.data?.['cortex.yaml'] || '';
+      if (!BACKEND_RE.test(yaml)) {
+        throw new Error('cortex.yaml has no reverse_proxy_backend line');
+      }
+      const next = yaml.replace(
+        BACKEND_RE,
+        `reverse_proxy_backend: "${value}"`,
+      );
+      await guarded(() =>
+        apiPatch(token, cmPath, [
+          { op: 'replace', path: '/data/cortex.yaml', value: next },
+        ]),
+      );
+      // Give the kubelet a moment to sync the mounted ConfigMap before
+      // the restarted engine reads it, then do a rollout restart
+      // (template annotation, like `kubectl rollout restart`).
+      await new Promise((r) => setTimeout(r, 3000));
+      await guarded(() =>
+        apiFetch(token, `/apis/apps/v1/namespaces/${ns}/deployments/cortex`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/merge-patch+json' },
+          body: JSON.stringify({
+            spec: {
+              template: {
+                metadata: {
+                  annotations: { 'cortex.io/restartedAt': new Date().toISOString() },
+                },
+              },
+            },
+          }),
+        }),
+      );
+      setBackend(value);
+      setBackendMsg('saved — engine restarting');
+    } catch (e) {
+      if (e instanceof ApiUnauthorizedError) return;
+      setBackendMsg(`failed: ${String((e as Error)?.message || e)}`);
+    } finally {
+      setSavingBackend(false);
+    }
+  };
+
   return (
     <>
       <PageSection>
@@ -252,6 +369,58 @@ const CortexPage: React.FC<CortexPageProps> = ({ token, user, onSessionExpired }
             )}
           </CardBody>
         </Card>
+
+        {ns && backend !== null && (
+          <Card style={{ marginTop: '16px' }}>
+            <CardTitle>Reverse proxy backend</CardTitle>
+            <CardBody>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <FormSelect
+                  aria-label="Reverse proxy backend"
+                  value={backendChoice}
+                  onChange={(_e, v) => {
+                    setBackendChoice(v);
+                    setBackendMsg('');
+                    if (v !== CUSTOM_BACKEND) void saveBackend(v);
+                  }}
+                  style={{ maxWidth: '380px' }}
+                >
+                  {BACKEND_CHOICES.map((c) => (
+                    <FormSelectOption key={c.value} value={c.value} label={c.label} />
+                  ))}
+                  <FormSelectOption value={CUSTOM_BACKEND} label="Custom…" />
+                </FormSelect>
+                {backendChoice === CUSTOM_BACKEND && (
+                  <>
+                    <TextInput
+                      aria-label="Custom backend URL"
+                      placeholder="https://…"
+                      value={customBackend}
+                      onChange={(_e, v) => setCustomBackend(v)}
+                      style={{ maxWidth: '380px' }}
+                    />
+                    <Button
+                      variant="secondary"
+                      isDisabled={savingBackend || !customBackend.trim()}
+                      onClick={() => void saveBackend(customBackend.trim())}
+                    >
+                      Apply
+                    </Button>
+                  </>
+                )}
+                {savingBackend && <Spinner size="sm" />}
+              </div>
+              {backendMsg && (
+                <p style={{ marginTop: '8px', fontSize: '13px' }}>{backendMsg}</p>
+              )}
+              <p style={{ marginTop: '8px', fontSize: '13px', color: '#6a6e73' }}>
+                Backend the engine's reverse proxy forwards to
+                (<code>cortex-{'<user>'}-r.{CLUSTER_APPS_DOMAIN}</code>). Current:{' '}
+                <code>{backend}</code>. Changing it restarts your engine.
+              </p>
+            </CardBody>
+          </Card>
+        )}
 
         {readyPod && (
           <Card style={{ marginTop: '16px' }}>
