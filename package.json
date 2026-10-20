@@ -1,26 +1,13 @@
 {
-  "name": "ocp-cortex-plugin",
-  "version": "0.1.0",
-  "description": "OpenShift console dynamic plugin for Cortex (per-user HAProxy service)",
+  "name": "ocp-cortex-app",
+  "version": "0.9.4",
+  "description": "Cortex standalone app (per-user service control surface, OpenShift IAM)",
   "private": true,
-  "consolePlugin": {
-    "name": "cortex",
-    "version": "0.8.3",
-    "displayName": "Cortex",
-    "description": "Per-user Cortex service control surface",
-    "exposedModules": {
-      "CortexPage": "./src/CortexPage"
-    },
-    "dependencies": {
-      "@console/pluginAPI": "*"
-    }
-  },
   "scripts": {
-    "clean": "rm -rf cortex-plugin-image/dist",
-    "build": "npm run clean && webpack"
+    "clean": "rm -rf cortex-app-image/dist",
+    "build": "npm run clean && webpack && node scripts/hash-index.mjs"
   },
   "dependencies": {
-    "@openshift-console/dynamic-plugin-sdk": "4.22.0",
     "@patternfly/react-core": "^6.7.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
@@ -28,7 +15,6 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@openshift-console/dynamic-plugin-sdk-webpack": "4.22.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "css-loader": "^6.7.1",

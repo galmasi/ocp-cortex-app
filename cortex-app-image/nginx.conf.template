@@ -1,0 +1,99 @@
+# nginx config for the Cortex standalone app. envsubst TEMPLATE —
+# the nginx-unprivileged entrypoint substitutes ${...} (OAUTH_BASIC,
+# from a Secret) at container start and writes the result to
+# /etc/nginx/nginx.conf (NGINX_ENVSUBST_OUTPUT_DIR). The client
+# secret must never appear in the repo or the JS bundle.
+#
+# Responsibilities:
+#   /                static SPA (try_files: /auth/callback deep-links)
+#   /auth/exchange   OAuth code-for-token exchange; adds the client
+#                    Basic-auth header and forwards to the OAuth
+#                    server's token endpoint
+#   /api, /apis      same-origin proxy to the apiserver with the
+#                    browser's Bearer token forwarded as-is
+#   /ws/             exec/attach WebSockets; browsers cannot set
+#                    Authorization headers on WebSocket, so the token
+#                    rides as ?access_token= and is moved into the
+#                    header here. The /ws prefix is stripped.
+#
+# TLS: this pod presents the cluster wildcard certificate (secret
+# cortex-tls) behind a passthrough Route — same ingress pattern as
+# the per-user instances. Clients get the cluster's LE cert.
+#
+# (No "daemon off;" here: the base image's CMD already passes
+# -g "daemon off;" and a second occurrence is a fatal error.)
+
+worker_processes 1;
+error_log /dev/stderr info;
+pid /tmp/nginx.pid;
+
+events { worker_connections 1024; }
+
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+
+  # Session tokens ride in query strings on /ws — log URIs without args.
+  log_format noquery '$remote_addr - $remote_user [$time_local] '
+                      '"$request_method $uri" $status $body_bytes_sent';
+  access_log /dev/stdout noquery;
+
+  server {
+    listen 8443 ssl;
+    server_name _;
+
+    ssl_certificate /etc/nginx/certs/tls.crt;
+    ssl_certificate_key /etc/nginx/certs/tls.key;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # --- static SPA; deep links (/auth/callback) fall back to index ---
+    location / {
+      try_files $uri $uri/ /index.html;
+    }
+
+    # --- OAuth code exchange: the only place the client secret lives ---
+    location = /auth/exchange {
+      proxy_pass https://oauth-openshift.apps.epoc000.ete14.res.ibm.com/oauth/token;
+      proxy_set_header Authorization "Basic ${OAUTH_BASIC}";
+      proxy_set_header Content-Type "application/x-www-form-urlencoded";
+      proxy_ssl_server_name on;
+    }
+
+    # --- Kubernetes REST: forward the browser's Bearer token as-is ---
+    location /api/ {
+      proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
+      proxy_set_header Authorization $http_authorization;
+      proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
+      proxy_ssl_verify on;
+      proxy_ssl_server_name on;
+      proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+    }
+    location /apis/ {
+      proxy_pass https://api.epoc000.ete14.res.ibm.com:6443;
+      proxy_set_header Authorization $http_authorization;
+      proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
+      proxy_ssl_verify on;
+      proxy_ssl_server_name on;
+      proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+    }
+
+    # --- exec/attach WebSockets: token from ?access_token= ---
+    location /ws/ {
+      proxy_pass https://api.epoc000.ete14.res.ibm.com:6443/;
+      proxy_set_header Authorization "Bearer $arg_access_token";
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_http_version 1.1;
+      proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
+      proxy_ssl_verify on;
+      proxy_ssl_server_name on;
+      proxy_ssl_name api.epoc000.ete14.res.ibm.com;
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+      # keep tokens out of the access log
+      access_log /dev/stdout noquery;
+    }
+  }
+}

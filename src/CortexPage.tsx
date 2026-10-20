@@ -6,18 +6,15 @@ import {
   CardBody,
   Spinner,
 } from '@patternfly/react-core';
-import {
-  useK8sWatchResource,
-  consoleFetchJSON,
-} from '@openshift-console/dynamic-plugin-sdk';
+import { apiFetch, apiPatch, ApiUnauthorizedError } from './api';
+import { ClusterUser, logout } from './auth';
 import CortexTerminal from './CortexTerminal';
 import StageErrorBoundary from './StageErrorBoundary';
 
-/** Injected at build time by DefinePlugin from package.json's
- * consolePlugin.version — shows on the page so the deployed version is
- * visible at a glance. */
+/** Injected at build time by DefinePlugin from package.json's version —
+ * shows on the page so the deployed version is visible at a glance. */
 declare const CORTEX_PLUGIN_VERSION: string | undefined;
-const PLUGIN_VERSION =
+const APP_VERSION =
   typeof CORTEX_PLUGIN_VERSION !== 'undefined' ? CORTEX_PLUGIN_VERSION : '?';
 
 /** Instance parameters — mirror of manifests/templates/cortex-instance.yaml */
@@ -71,9 +68,6 @@ stream {
 interface Metadata {
   name?: string;
 }
-interface UserObject {
-  metadata?: Metadata;
-}
 interface DeploymentObject {
   metadata?: Metadata;
   spec?: { replicas?: number };
@@ -107,9 +101,6 @@ const sanitize = (name: string): string =>
 const isNotFound = (e: unknown): boolean =>
   (e as { code?: number })?.code === 404;
 
-/** Kubernetes API through the console's authenticated passthrough proxy. */
-const api = (path: string) => `/api/kubernetes/${path.replace(/^\//, '')}`;
-
 const resourcePath = (o: K8sObject, ns: string): string => {
   const name = o.metadata?.name;
   switch (`${o.apiVersion}/${o.kind}`) {
@@ -128,21 +119,6 @@ const resourcePath = (o: K8sObject, ns: string): string => {
 
 const collectionPath = (o: K8sObject, ns: string): string =>
   resourcePath(o, ns).replace(/\/[^/]+$/, '');
-
-const getJSON = <T extends object>(path: string) =>
-  consoleFetchJSON(api(path)) as Promise<T>;
-
-const postJSON = (path: string, body: object) =>
-  consoleFetchJSON(api(path), 'POST', {
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  } as RequestInit);
-
-const patchJSON = (path: string, patches: object[]) =>
-  consoleFetchJSON(api(path), 'PATCH', {
-    headers: { 'Content-Type': 'application/json-patch+json' },
-    body: JSON.stringify(patches),
-  } as RequestInit);
 
 /**
  * The per-user instance. Mirrors manifests/templates/cortex-instance.yaml.
@@ -206,7 +182,7 @@ const buildObjects = (ns: string, userName: string): K8sObject[] => {
                 // The interactive observer. PID 1 is a supervisor that
                 // starts a detached tmux session named "agentop" running
                 // the traffic-viewer TUI and keeps the pod alive while
-                // the session exists. The console terminal connects with
+                // the session exists. The terminal connects with
                 // `tmux attach -t agentop` over exec, so every connect
                 // gets a full repaint (tmux keeps screen state
                 // server-side) and closing the terminal kills nothing.
@@ -291,65 +267,42 @@ const buildObjects = (ns: string, userName: string): K8sObject[] => {
 
 type Phase = 'identity' | 'checking' | 'starting' | 'ready' | 'error';
 
+export interface CortexPageProps {
+  token: string;
+  user: ClusterUser;
+  onSessionExpired: () => void;
+}
+
 /**
  * Cortex page — per-user instance.
  *
- * On open: identify the logged-in user (GET users/~), ensure the user's
- * cortex-<username> namespace holds the full instance (ConfigMap,
- * Deployment with cortex+agentop containers, Service, Route), wait for
- * the agentop container to become Ready, then attach the terminal to it.
+ * On open: ensure the user's cortex-<username> namespace holds the full
+ * instance (ConfigMap, Deployment with cortex+agentop containers,
+ * Service, Route), wait for the agentop container to become Ready, then
+ * attach the terminal to it. Pod state is polled — the standalone app
+ * has no console watch infrastructure.
  */
-const CortexPage: React.FC = () => {
+const CortexPage: React.FC<CortexPageProps> = ({ token, user, onSessionExpired }) => {
   const [phase, setPhase] = React.useState<Phase>('identity');
   const [error, setError] = React.useState<string | null>(null);
-  const [userName, setUserName] = React.useState('');
+  const [readyPod, setReadyPod] = React.useState<string | null>(null);
+  const [waitingReason, setWaitingReason] = React.useState('');
   const ensuredRef = React.useRef<string | null>(null);
 
-  // Who is logged in? GET users/~ — the server-side '~' shortcut resolves
-  // to the current user. (A named watch on '~' would list-and-filter for a
-  // literal user named '~', which does not exist.)
-  React.useEffect(() => {
-    let cancelled = false;
-    consoleFetchJSON(api('/apis/user.openshift.io/v1/users/~'))
-      .then((u: UserObject) => {
-        if (!cancelled) setUserName(u?.metadata?.name || '');
-      })
-      .catch((e: Error) => {
-        if (!cancelled) {
-          setError(`identity: ${String(e?.message || e)}`);
-          setPhase('error');
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
+  const userName = user.name;
   const ns = userName ? `cortex-${sanitize(userName)}` : '';
 
-  // Watch the instance pods (only once the namespace is known).
-  const [pods] = useK8sWatchResource<PodObject[]>(
-    ns
-      ? {
-          kind: 'Pod',
-          isList: true,
-          namespace: ns,
-          selector: { matchLabels: { app: 'cortex' } },
-          optional: true,
-        }
-      : null,
-  );
-
-  const agentopStatus = (pods || []).map((p) =>
-    p.status?.containerStatuses?.find((c) => c.name === 'agentop'),
-  );
-  const readyPod = (pods || []).find((p) =>
-    p.status?.containerStatuses?.some((c) => c.name === 'agentop' && c.ready),
-  );
-  const pendingPod = (pods || []).find(
-    (p) =>
-      !p.status?.containerStatuses?.some((c) => c.name === 'agentop' && c.ready),
-  );
+  const guarded = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e instanceof ApiUnauthorizedError) {
+        onSessionExpired();
+        throw e;
+      }
+      throw e;
+    }
+  };
 
   // Ensure-started: idempotent GET -> CREATE for each object, then scale
   // the Deployment up if the idle reaper had stopped it.
@@ -359,31 +312,38 @@ const CortexPage: React.FC = () => {
     let cancelled = false;
 
     (async () => {
-      setPhase('checking');
       try {
+        setPhase('checking');
         const objects = buildObjects(ns, userName);
         for (const o of objects) {
           const path = resourcePath(o, ns);
           try {
-            await getJSON(path);
+            await guarded(() => apiFetch(token, path));
           } catch (e) {
             if (!isNotFound(e)) throw e;
-            await postJSON(collectionPath(o, ns), o);
+            await guarded(() =>
+              apiFetch(token, collectionPath(o, ns), {
+                method: 'POST',
+                body: JSON.stringify(o),
+              }),
+            );
           }
         }
         // objects: [config, tls-front-conf, deployment, service, route]
-        const deployment = await getJSON<DeploymentObject>(
-          resourcePath(objects[2], ns),
+        const deployment = await guarded(() =>
+          apiFetch<DeploymentObject>(token, resourcePath(objects[2], ns)),
         );
         if (!deployment.spec?.replicas) {
           // Stopped by the idle reaper — wake it up.
-          await patchJSON(resourcePath(objects[1], ns), [
-            { op: 'replace', path: '/spec/replicas', value: 1 },
-          ]);
+          await guarded(() =>
+            apiPatch(token, resourcePath(objects[2], ns), [
+              { op: 'replace', path: '/spec/replicas', value: 1 },
+            ]),
+          );
         }
         setPhase('starting');
       } catch (e) {
-        if (!cancelled) {
+        if (!cancelled && !(e instanceof ApiUnauthorizedError)) {
           setError(String((e as Error)?.message || e));
           setPhase('error');
         }
@@ -393,34 +353,96 @@ const CortexPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [userName, ns]);
+  }, [userName, ns, token]);
 
+  // Poll pod state until the agentop container is Ready.
   React.useEffect(() => {
-    if (phase === 'starting' && readyPod) setPhase('ready');
-  }, [phase, readyPod]);
+    if (phase !== 'starting' || !ns) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const list = await guarded(() =>
+          apiFetch<{ items?: PodObject[] }>(
+            token,
+            `/api/v1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent('app=cortex')}`,
+          ),
+        );
+        const pods = (list.items || [])
+          .filter((p) => !p.metadata?.name?.includes('debug'))
+          .sort((a, b) =>
+            String(a.metadata?.name).localeCompare(String(b.metadata?.name)),
+          );
+        const ready = pods.find((p) =>
+          p.status?.containerStatuses?.some((c) => c.name === 'agentop' && c.ready),
+        );
+        const pending = pods.find(
+          (p) =>
+            !p.status?.containerStatuses?.some((c) => c.name === 'agentop' && c.ready),
+        );
+        if (cancelled) return;
+        if (ready) {
+          setReadyPod(ready.metadata?.name || null);
+          return; // stop polling
+        }
+        if (pending) {
+          setWaitingReason(
+            pending.status?.containerStatuses?.find((c) => c.name === 'agentop')
+              ?.state?.waiting?.reason ||
+              pending.status?.phase ||
+              '',
+          );
+        }
+      } catch (e) {
+        if (e instanceof ApiUnauthorizedError) return;
+        if (!cancelled) setError(String((e as Error)?.message || e));
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [phase, ns, token]);
 
-  const waitingReason =
-    pendingPod?.status?.containerStatuses?.find((c) => c.name === 'agentop')
-      ?.state?.waiting?.reason ||
-    agentopStatus.find((c) => c?.state?.waiting?.reason)?.state?.waiting
-      ?.reason ||
-    pendingPod?.status?.phase ||
-    '';
+  const routeHost = userName ? `cortex-${sanitize(userName)}.${CLUSTER_APPS_DOMAIN}` : '';
 
-  const routeHost = userName
-    ? `cortex-${sanitize(userName)}.${CLUSTER_APPS_DOMAIN}`
-    : '';
   return (
     <>
       <PageSection>
         <Title headingLevel="h1" size="2xl">
           Cortex{' '}
           <span style={{ fontSize: '13px', fontWeight: 'normal' }}>
-            (plugin v{PLUGIN_VERSION})
+            (v{APP_VERSION})
+          </span>
+          <span style={{ float: 'right', fontSize: '13px', fontWeight: 'normal' }}>
+            {userName ? (
+              <>
+                <code>{userName}</code>{' '}
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    logout();
+                  }}
+                  style={{ fontSize: '13px' }}
+                >
+                  log out
+                </a>
+              </>
+            ) : null}
           </span>
         </Title>
+        {/* TODO: this will become a link to a page served by this app
+            for installing/configuring claude code instances to point
+            at the per-user proxy. */}
+        <p style={{ fontSize: '13px', color: '#6a6e73', marginTop: '4px' }}>
+          place holder -- user instructions
+        </p>
       </PageSection>
-      <PageSection>
+      {/* Reduced left gutter; keep a matching right gutter so the
+          terminal doesn't abut the browser edge. */}
+      <PageSection style={{ paddingLeft: '8px', paddingRight: '16px' }}>
         <Card>
           <CardBody>
             {!userName ? (
@@ -429,8 +451,7 @@ const CortexPage: React.FC = () => {
               </div>
             ) : (
               <div style={{ marginBottom: '16px', fontSize: '13px' }}>
-                user <code>{userName}</code> — instance{' '}
-                <code>{ns}/cortex</code>
+                user <code>{userName}</code> — instance <code>{ns}/cortex</code>
                 {routeHost && (
                   <>
                     {' '}
@@ -458,10 +479,11 @@ const CortexPage: React.FC = () => {
           <Card style={{ marginTop: '16px' }}>
             <StageErrorBoundary title="Terminal">
               <CortexTerminal
-                key={`${ns}/${readyPod.metadata?.name}`}
+                key={`${ns}/${readyPod}`}
                 namespace={ns}
-                pod={readyPod.metadata?.name || ''}
+                pod={readyPod}
                 container="agentop"
+                token={token}
               />
             </StageErrorBoundary>
           </Card>

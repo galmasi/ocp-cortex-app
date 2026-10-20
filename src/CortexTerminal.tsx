@@ -7,6 +7,10 @@ interface CortexTerminalProps {
   namespace: string;
   pod: string;
   container: string;
+  /** OAuth access token; browsers cannot set Authorization headers on
+   * WebSocket, so it rides as ?access_token= and nginx injects the
+   * header when proxying to the apiserver. */
+  token: string;
 }
 
 /**
@@ -37,6 +41,7 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
   namespace,
   pod,
   container,
+  token,
 }) => {
   const divRef = React.useRef<HTMLDivElement>(null);
 
@@ -54,15 +59,30 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
     term.open(div);
     fit.fit();
 
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const base = `${proto}//${window.location.host}` +
-      `/api/kubernetes/api/v1/namespaces/${encodeURIComponent(namespace)}` +
+    // Same-origin proxy: nginx forwards /ws/... to the apiserver with
+    // the Bearer token from ?access_token= (browsers cannot set headers
+    // on WebSocket), stripping the /ws prefix.
+    // NOTE: the WebSocket constructor REQUIRES an absolute ws:// or
+    // wss:// URL — a relative path throws SyntaxError before any
+    // request is made.
+    const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const base = `${wsProto}://${window.location.host}` +
+      `/ws/api/v1/namespaces/${encodeURIComponent(namespace)}` +
       `/pods/${encodeURIComponent(pod)}/exec`;
     // exec takes the command as repeated ?command= query params.
+    // NOTE: build the query with encodeURIComponent, NOT URLSearchParams —
+    // URLSearchParams uses the x-www-form-urlencoded serializer, which
+    // percent-encodes "~" to %7E and thus corrupts sha256~ OAuth tokens
+    // (encodeURIComponent leaves ~ unescaped).
     const execUrl = (cmd: string[]) => {
-      const params = new URLSearchParams({ container, stdout: '1', stderr: '1' });
-      cmd.forEach((c) => params.append('command', c));
-      return `${base}?${params}`;
+      const q = [
+        `container=${encodeURIComponent(container)}`,
+        'stdout=1',
+        'stderr=1',
+        `access_token=${encodeURIComponent(token)}`,
+        ...cmd.map((c) => `command=${encodeURIComponent(c)}`),
+      ];
+      return `${base}?${q.join('&')}`;
     };
     const ws = new WebSocket(
       execUrl(['tmux', 'attach', '-t', 'agentop']) + '&stdin=1&tty=true',
@@ -198,7 +218,7 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
       ws.close();
       term.dispose();
     };
-  }, [namespace, pod, container]);
+  }, [namespace, pod, container, token]);
 
   return (
     <div

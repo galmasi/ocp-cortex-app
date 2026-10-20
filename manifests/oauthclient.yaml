@@ -1,0 +1,32 @@
+# OAuthClient registering the Cortex standalone app with the cluster's
+# OAuth server (the same IAM the OpenShift console uses).
+#
+# Cluster-scoped; apply as cluster-admin. The secret here must match
+# the OAUTH_BASIC value in Secret cortex-app/cortex-oauth:
+#   OAUTH_BASIC = base64("cortex-app:<secret>")
+#
+# grantMethod auto: first-time consent is granted automatically (the
+# app is ours; there is no third-party consent step).
+#
+# Apply with the secret filled in, e.g.:
+#   oc process -f oauthclient.yaml -p SECRET=... | oc apply -f -
+# or apply the pre-created one on epoc000 (the secret is only in the
+# cluster Secret, never in git).
+---
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: cortex-oauthclient
+parameters:
+  - name: SECRET
+    displayName: OAuth client secret
+    required: true
+objects:
+  - apiVersion: oauth.openshift.io/v1
+    kind: OAuthClient
+    metadata:
+      name: cortex-app
+    grantMethod: auto
+    redirectURIs:
+      - https://cortex-app.apps.epoc000.ete14.res.ibm.com/auth/callback
+    secret: ${SECRET}
