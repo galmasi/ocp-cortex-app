@@ -40,6 +40,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # The per-user engine CA (tls_bridge leaf certs) lives in Secret
+  # cortex-ca, created by the gateway at provision time.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update"]
   - apiGroups: [""]
     resources: ["configmaps", "services", "endpoints"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]

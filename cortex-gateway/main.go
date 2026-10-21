@@ -28,14 +28,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -66,15 +72,15 @@ var (
 const (
 	engineFwdPort = 13001 // engine forward proxy (listener.forward_proxy_addr)
 	engineRevPort = 8080  // engine reverse proxy ("Reverse server listening" :8080 — NOT
-	                      // the transparent interceptor, which drops direct
-	                      // connections as self-referential)
+	// the transparent interceptor, which drops direct
+	// connections as self-referential)
 	engineTransparentPort = 18082 // transparent_proxy_addr (interception-only listener)
-	sessionAPIPort = 19095
-	cortexImage   = "ghcr.io/galmasi/cortex-binaries:latest"
+	sessionAPIPort        = 19095
+	cortexImage           = "ghcr.io/galmasi/cortex-binaries:latest"
 
-	gatewayNS        = "cortex"
-	gatewaySvcName   = "cortex-gateway" // our own Service; ClusterIP is pinned into every user's Endpoints
-	userRoleName     = "cortex-user"
+	gatewayNS      = "cortex"
+	gatewaySvcName = "cortex-gateway" // our own Service; ClusterIP is pinned into every user's Endpoints
+	userRoleName   = "cortex-user"
 )
 
 // ---------------------------------------------------------------------------
@@ -109,7 +115,7 @@ func newKube() (*kube, error) {
 	return &kube{
 		base:  "https://" + net.JoinHostPort(host, port),
 		token: string(token),
-		hc:    &http.Client{Transport: &http.Transport{
+		hc: &http.Client{Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: pool},
 		}},
 	}, nil
@@ -215,6 +221,8 @@ func collectionPath(o map[string]any) string {
 		return "/api/v1/namespaces"
 	case "ConfigMap":
 		return fmt.Sprintf("/api/v1/namespaces/%s/configmaps", ns)
+	case "Secret":
+		return fmt.Sprintf("/api/v1/namespaces/%s/secrets", ns)
 	case "Service":
 		return fmt.Sprintf("/api/v1/namespaces/%s/services", ns)
 	case "Endpoints":
@@ -273,16 +281,83 @@ pipeline:
 `, engineFwdPort, engineTransparentPort, sessionAPIPort, user)
 }
 
+// genCA creates the engine CA — the Go equivalent of
+//
+//	openssl req -x509 -newkey rsa:2048 -nodes \
+//	  -subj "/CN=authbridge-local-ca" -days 365 \
+//	  -addext "basicConstraints=critical,CA:TRUE"
+//
+// (done in-process: the gateway image is FROM scratch, no openssl).
+// Cortex issues its tls_bridge leaf certificates from this CA; the CA
+// itself lives in Secret cortex-ca and survives restarts.
+//
+// One CA per gateway process: buildInstance runs on every wake, and
+// RSA keygen is too slow to repeat per handshake. Existing namespaces
+// keep their own Secret (ensureObject is create-if-missing), and
+// cortex always reads the CA from the mount — a gateway restart never
+// invalidates CAs already issued.
+var (
+	caOnce   sync.Once
+	caCrtPEM []byte
+	caKeyPEM []byte
+	caGenErr error
+)
+
+func genCA() (certPEM, keyPEM []byte, err error) {
+	caOnce.Do(func() {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			caGenErr = err
+			return
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:          big.NewInt(time.Now().UnixNano()),
+			Subject:               pkix.Name{CommonName: "authbridge-local-ca"},
+			NotBefore:             time.Now().Add(-time.Hour), // clock-skew tolerance
+			NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+			BasicConstraintsValid: true, // critical CA:TRUE
+			IsCA:                  true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			caGenErr = err
+			return
+		}
+		caCrtPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		caKeyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	})
+	return caCrtPEM, caKeyPEM, caGenErr
+}
+
 func (g *gateway) buildInstance(ns, user string) []map[string]any {
 	san := sanitize(user)
 	labels := map[string]any{"app": "cortex", "cortex-user": san}
 	meta := func(name string) map[string]any {
 		return map[string]any{"name": name, "namespace": ns, "labels": labels}
 	}
+	caCrt, caKey, err := genCA()
+	if err != nil {
+		// Provision cannot proceed without the CA; surface loudly.
+		log.Fatalf("genCA for %s: %v", ns, err)
+	}
 	return []map[string]any{
 		{
 			"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("cortex-config"),
 			"data": map[string]any{"cortex.yaml": cortexConfigYaml(user)},
+		},
+		{
+			// CA for the engine's tls_bridge leaf certificates.
+			// ensureObject is create-if-missing, so the CA is written
+			// once at first provision and never clobbered. Mounted
+			// read-only at /etc/cortex/ca: cortex issues per-pod leaf
+			// certs from this CA, so trust in the CA survives engine
+			// restarts and pod replacement.
+			"apiVersion": "v1", "kind": "Secret", "metadata": meta("cortex-ca"),
+			"data": map[string]any{
+				"tls.crt": base64.StdEncoding.EncodeToString(caCrt),
+				"tls.key": base64.StdEncoding.EncodeToString(caKey),
+			},
 		},
 		{
 			"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta("cortex"),
@@ -302,6 +377,7 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 								"args":    []any{"--config", "/etc/cortex/cortex.yaml"},
 								"volumeMounts": []any{
 									map[string]any{"name": "config", "mountPath": "/etc/cortex", "readOnly": true},
+									map[string]any{"name": "ca", "mountPath": "/etc/cortex/ca", "readOnly": true},
 								},
 								"resources": map[string]any{
 									"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
@@ -320,8 +396,8 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 										`tmux set-option -t agentop -w window-size manual; `+
 										`while tmux has-session -t agentop 2>/dev/null; do sleep 30; done`, sessionAPIPort),
 								},
-								"env":  []any{map[string]any{"name": "TERM", "value": "xterm-256color"}},
-								"tty":  true,
+								"env":   []any{map[string]any{"name": "TERM", "value": "xterm-256color"}},
+								"tty":   true,
 								"stdin": true,
 								"resources": map[string]any{
 									"requests": map[string]any{"cpu": "50m", "memory": "64Mi"},
@@ -331,6 +407,7 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 						},
 						"volumes": []any{
 							map[string]any{"name": "config", "configMap": map[string]any{"name": "cortex-config"}},
+							map[string]any{"name": "ca", "secret": map[string]any{"secretName": "cortex-ca"}},
 						},
 					},
 				},
@@ -412,9 +489,9 @@ func userRBAC(ns, user string) []map[string]any {
 // per-user idle table.
 
 type userState struct {
-	mu           sync.Mutex
-	lastUse      time.Time
-	conns        int
+	mu            sync.Mutex
+	lastUse       time.Time
+	conns         int
 	lastWakePatch time.Time
 }
 
@@ -1093,9 +1170,9 @@ func (g *gateway) handleExec(w http.ResponseWriter, r *http.Request) {
 	streamDone := make(chan error, 1)
 	go func() {
 		opts := remotecommand.StreamOptions{
-			Stdout: writerFunc(func(p []byte) (int, error) { send(1, p); return len(p), nil }),
-			Stderr: writerFunc(func(p []byte) (int, error) { send(2, p); return len(p), nil }),
-			Tty:    q.Get("tty") != "",
+			Stdout:            writerFunc(func(p []byte) (int, error) { send(1, p); return len(p), nil }),
+			Stderr:            writerFunc(func(p []byte) (int, error) { send(2, p); return len(p), nil }),
+			Tty:               q.Get("tty") != "",
 			TerminalSizeQueue: queue,
 		}
 		// Only wire Stdin when the caller asked for it: with stdin
