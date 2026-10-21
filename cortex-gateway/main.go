@@ -259,7 +259,9 @@ func cortexConfigYaml(user string) string {
   session_api_addr: "127.0.0.1:%d"
 
 tls_bridge:
-  mode: disabled
+  mode: enabled
+  ca_dir: /ca   # MUST persist across restarts
+  generate_ca: true
 
 pipeline:
   outbound:
@@ -782,6 +784,30 @@ func (g *gateway) handleTLSConn(raw net.Conn) {
 	g.proxyConn(tlsConn, ns, reverse)
 }
 
+// dialEngine connects to an engine pod. With tls_bridge enabled cortex
+// autogenerates its own certificate per pod and serves TLS — we cannot
+// pin a per-pod cert, so verification is skipped: this hop is the
+// private pod network, to a pod IP we ourselves resolved inside the
+// user's namespace, and the plain-TCP dial it replaces carried no
+// verification either. Engines still running without tls_bridge answer
+// the TLS handshake with garbage (or nothing): on handshake failure we
+// fall back to a plain connection, so old and new engines coexist.
+func (g *gateway) dialEngine(ip string, port int) (net.Conn, error) {
+	addr := net.JoinHostPort(ip, strconv.Itoa(port))
+	raw, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	tlsBackend := tls.Client(raw, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec
+	_ = tlsBackend.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := tlsBackend.Handshake(); err == nil {
+		_ = tlsBackend.SetDeadline(time.Time{})
+		return tlsBackend, nil
+	}
+	raw.Close()
+	return net.DialTimeout("tcp", addr, 10*time.Second)
+}
+
 // proxyConn tunnels the decrypted stream to the user's engine pod.
 func (g *gateway) proxyConn(tlsConn *tls.Conn, ns string, reverse bool) {
 	defer tlsConn.Close()
@@ -801,7 +827,7 @@ func (g *gateway) proxyConn(tlsConn *tls.Conn, ns string, reverse bool) {
 		log.Printf("proxy %s: %v", ns, err)
 		return
 	}
-	backend, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 10*time.Second)
+	backend, err := g.dialEngine(ip, port)
 	if err != nil {
 		// Stale pod IP (pod replaced between lookup and dial): refresh
 		// once and retry before giving up.
@@ -811,7 +837,7 @@ func (g *gateway) proxyConn(tlsConn *tls.Conn, ns string, reverse bool) {
 			log.Printf("proxy %s: %v", ns, err)
 			return
 		}
-		backend, err = net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 10*time.Second)
+		backend, err = g.dialEngine(ip, port)
 		if err != nil {
 			log.Printf("dial %s:%d: %v", ip, port, err)
 			return
