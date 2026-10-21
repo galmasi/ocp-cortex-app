@@ -5,8 +5,9 @@ using the cluster's own IAM (the OpenShift OAuth server — the same
 login the console uses). Replaces the earlier OpenShift console
 dynamic plugin (retired; see git history).
 
-Served at `https://cortex.apps.epoc000.ete14.res.ibm.com`.
-(`cortex.apps.<domain>` is the console itself on this cluster.)
+Served at `https://cortex.apps.<apps-domain>/` on whatever cluster it is
+deployed to (current deployments: **epoc001** — main development box —
+and **epoc000**, a frozen demo; do not redeploy epoc000).
 
 ## Layout
 
@@ -24,17 +25,14 @@ Served at `https://cortex.apps.epoc000.ete14.res.ibm.com`.
 ├── cortex-gateway/              # shared gateway (see DESIGN.md Part 2):
 │   ├── main.go                  # SNI demux + wake/reap + provision
 │   └── Dockerfile               # static Go binary on scratch
-├── cortex-image/                # per-user instance pod image (owner-
-│   └── README.md                # maintained Dockerfile, not in repo)
+├── cortex-pod-image/            # per-user engine pod image (cortex +
+│   └── …                        # agentop binaries, ghcr.io/galmasi/)
 ├── manifests/
-│   ├── cortex.yaml          # ns, Deployment, Service, Route
-│   ├── gateway.yaml             # gateway: SA, ClusterRole, Deployment,
+│   ├── cortex.template.yaml     # app ns, Deployment, Service, Route
+│   │                            # (embedded nginx config; __TOKEN__s)
+│   ├── gateway.template.yaml    # gateway: SA, ClusterRole, Deployment,
 │   │                            # Services, cortex-gw route, PDB
-│   ├── oauthclient.yaml         # OAuthClient template (cluster-admin)
-│   ├── deploy.yaml              # RETIRED plugin deploy (history)
-│   └── templates/cortex-instance.yaml  # per-user instance reference
-└── scripts/reconcile.sh         # legacy eager reconciler (superseded
-                                 # by the gateway's provision endpoint)
+│   └── oauthclient.yaml         # OAuthClient template (cluster-admin)
 ```
 
 ## Architecture
@@ -45,7 +43,7 @@ The browser talks only to the app's own origin. nginx is the backend:
 |---|---|
 | `/` | serves the SPA (deep links fall back to index.html) |
 | `/auth/exchange` | adds the OAuth client Basic-auth header (secret from `Secret cortex-oauth`, envsubst'ed into the config at startup) and forwards to the OAuth server's `/oauth/token` |
-| `/api`, `/apis` | proxies to the apiserver (external endpoint on epoc000 — pods cannot reach ClusterIPs), forwarding the browser's Bearer token (TLS verified against the serviceaccount CA) |
+| `/api`, `/apis` | proxies to the apiserver (external endpoint when pods cannot reach service ClusterIPs — the epoc000 pathology; pass `--external-api`), forwarding the browser's Bearer token (TLS verified against the serviceaccount CA) |
 | `/__cortex/` | proxies to the **cortex gateway** admin surface (via the `cortex-gw` edge route): SPA instance provisioning (`POST /__cortex/provision`) and the per-minute keep-alive heartbeat that drives the gateway's idle reaper |
 | `/ws/…` | exec/attach WebSockets; browsers cannot set headers on WebSocket, so the token rides as `?access_token=` and is moved into `Authorization` here. Prefix stripped. |
 
@@ -113,8 +111,8 @@ Nothing cluster-specific is baked into the SPA (it derives the OAuth
 server from its own origin) or the gateway (it discovers the apps
 domain at startup; `-apps-domain` overrides).
 
-Cluster-side prerequisites (one-time, cluster-admin — already applied
-on epoc000):
+Cluster-side prerequisites (one-time, cluster-admin — all created
+by `scripts/deploy.sh`):
 
 - `manifests/cortex.yaml` applied
 - `OAuthClient cortex` with a secret; matching
@@ -135,6 +133,6 @@ on epoc000):
 - **Terminal empty / no resize** — see `CortexTerminal.tsx` comments;
   resize execs are logged to the browser console as
   `[cortex] resize CxR`.
-- The per-user instance itself (engine, tls-front, route, cert
-  plumbing) is unchanged from the plugin era — see
-  `manifests/templates/cortex-instance.yaml` and `DESIGN.md`.
+- The per-user instance itself (engine pod, Service/Endpoints, Routes,
+  RBAC) is created by the gateway's provision endpoint — see
+  `cortex-gateway/main.go` and `DESIGN.md`.

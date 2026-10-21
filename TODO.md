@@ -49,14 +49,17 @@ terminal). Remaining work, roughly in no particular order:
     just unnecessary)
   - the `routes/custom-host` + `endpoints/restricted` permissions
     (stock OpenShift restricts these too; harmless where it doesn't)
-  - NOT yet verified on a second cluster — deploy by hand and report.
-- **Cross-cluster deployability** — mostly DONE via
-  `scripts/deploy.sh` (see the cluster-name item above). Still open:
-  actually deploying on a second cluster to verify the epoc000
-  admissions/RBAC quirks behave (`routes/custom-host`,
-  `endpoints/restricted`, pod-IP endpoints, in-cluster apiserver
-  reachability from nginx). A Helm chart could replace deploy.sh later
-  if parameterization outgrows sed.
+  - verified on epoc001 (0.15.x): in-cluster apiserver works, but a
+    middlebox in front of it 403s websocket-upgrade execs — handled by
+    the gateway exec relay (`/__cortex/exec`, WS<->SPDY with the
+    user's token); the SPA falls back to it automatically.
+- **Cross-cluster deployability** — DONE via `scripts/deploy.sh` on
+  two clusters now: epoc000 (demo, frozen — do not redeploy) and
+  epoc001 (main development box). Cluster quirks found so far: epoc000
+  pods cannot reach service ClusterIPs (`--external-api`); epoc001's
+  apiserver path blocks WS exec upgrades (gateway relay handles it).
+  A Helm chart could replace deploy.sh later if parameterization
+  outgrows sed.
 - **Persistent storage** for cortex (per-user instance state).
 - **Cortex lifecycle** — DONE in design: the shared cortex-gateway
   (DESIGN.md Part 2) provisions on first login, wakes on proxy use,

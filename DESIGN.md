@@ -25,7 +25,7 @@ namespace:  cortex-alice
 deployment: cortex            (same name in every user namespace)
 configmap:  cortex-config     (per-user customization)
 service:    cortex
-route:      cortex-alice.apps.epoc000.ete14.res.ibm.com
+route:      cortex-alice.apps.<apps-domain>
 ```
 
 Username sanitization: lower-case, non-`[a-z0-9-]` → `-`, collapse runs,
@@ -90,14 +90,10 @@ template annotation) on next connect.
 
 ## Objects
 
-- `templates/cortex-instance.yaml` — OpenShift Template (parameterized
-  by USERNAME) producing the ConfigMap + Deployment + Service + Route.
-  Process with:
-  ```sh
-  oc process -f templates/cortex-instance.yaml -p USERNAME=alice | oc apply -f -
-  ```
-  In production the *plugin* emits the same objects via the API instead
-  of `oc process`; the template doubles as the reference manifest.
+- per-user objects (ConfigMap, Deployment, Service/Endpoints, Routes,
+  per-user Role/RoleBinding) are emitted by the gateway's provision
+  endpoint via the API — `cortex-gateway/main.go` (`buildInstance`) is
+  the reference.
 - `templates/cortex-user-rbac.yaml` — the Role + RoleBinding granting
   the user exactly: exec/get/list pods, get/create/patch deployments,
   get/create/patch configmaps — all within their own namespace only.
