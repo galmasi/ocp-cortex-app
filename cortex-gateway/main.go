@@ -958,7 +958,22 @@ func (g *gateway) handleStatus(w http.ResponseWriter, r *http.Request) {
 // and this gateway gains no privilege it did not have.
 
 var wsUpgrader = websocket.Upgrader{
-	Subprotocols:  []string{"v5.channel.k8s.io", "v4.channel.k8s.io"},
+	Subprotocols: []string{"v5.channel.k8s.io", "v4.channel.k8s.io"},
+	// Browsers send Origin (https://cortex.<apps-domain>) while nginx
+	// rewrites Host to the cortex-gw route, so gorilla's default
+	// same-host check rejects every browser connection. Allow origins
+	// on this cluster's apps domain (and non-browser clients, which
+	// send no Origin) — the exec itself is authorized by the user's
+	// token, which the apiserver validates.
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		return err == nil && u.Host != "" &&
+			(strings.HasSuffix(u.Host, "."+*appsDomain) || u.Host == *appsDomain)
+	},
 	ReadBufferSize:  8192,
 	WriteBufferSize: 8192,
 }
