@@ -2,7 +2,7 @@
 FROM docker.io/library/golang:1.22 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-COPY main.go ./
+COPY main.go upstream-ca.pem ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/cortex-gateway .
 
 FROM scratch

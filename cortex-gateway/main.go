@@ -33,6 +33,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -276,7 +277,6 @@ tls_bridge:
   mode: enabled
   ca_dir: /etc/cortex/ca
   generate_ca: false
-  generate_ca: true
 
 pipeline:
   outbound:
@@ -309,6 +309,17 @@ var (
 	caKeyPEM []byte
 	caGenErr error
 )
+
+// upstreamCA is the public root store handed to the engine pods. The
+// engine image is FROM scratch — no /etc/ssl/certs — so its Go TLS
+// (the reverse proxy's default transport, the tls_bridge re-origination
+// client) would fail every public-CA certificate with "x509:
+// certificate signed by unknown authority". Go's SystemCertPool honors
+// SSL_CERT_FILE on Linux, so the bundle is mounted as a ConfigMap and
+// named by that env var; curl/git in the engine pick it up too.
+//
+//go:embed upstream-ca.pem
+var upstreamCA []byte
 
 func genCA() (certPEM, keyPEM []byte, err error) {
 	caOnce.Do(func() {
@@ -370,6 +381,11 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 			},
 		},
 		{
+			// Public root store for the engine (see upstreamCA above).
+			"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("cortex-upstream-ca"),
+			"data": map[string]any{"ca.pem": string(upstreamCA)},
+		},
+		{
 			"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta("cortex"),
 			"spec": map[string]any{
 				"replicas": 1,
@@ -385,9 +401,14 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 								"image":   cortexImage,
 								"command": []any{"/cortex"},
 								"args":    []any{"--config", "/etc/cortex/cortex.yaml"},
+								"env": []any{map[string]any{
+									// The engine's TLS trust anchor (see upstreamCA).
+									"name": "SSL_CERT_FILE", "value": "/etc/cortex/upstream-ca/ca.pem",
+								}},
 								"volumeMounts": []any{
 									map[string]any{"name": "config", "mountPath": "/etc/cortex", "readOnly": true},
 									map[string]any{"name": "ca", "mountPath": "/etc/cortex/ca", "readOnly": true},
+									map[string]any{"name": "upstream-ca", "mountPath": "/etc/cortex/upstream-ca", "readOnly": true},
 								},
 								"resources": map[string]any{
 									"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
@@ -418,6 +439,7 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 						"volumes": []any{
 							map[string]any{"name": "config", "configMap": map[string]any{"name": "cortex-config"}},
 							map[string]any{"name": "ca", "secret": map[string]any{"secretName": "cortex-ca"}},
+							map[string]any{"name": "upstream-ca", "configMap": map[string]any{"name": "cortex-upstream-ca"}},
 						},
 					},
 				},
