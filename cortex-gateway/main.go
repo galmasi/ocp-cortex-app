@@ -267,8 +267,15 @@ func cortexConfigYaml(user string) string {
   session_api_addr: "127.0.0.1:%d"
 
 tls_bridge:
+  # Terminate agent egress TLS so the outbound pipeline (inference
+  # parser, a2a) sees decrypted HTTPS. The signing CA is the
+  # gateway-generated Secret cortex-ca, mounted read-only at
+  # /etc/cortex/ca (tls.crt/tls.key/ca.crt) — persistent across
+  # restarts, never regenerated here (generate_ca stays false so a
+  # missing Secret fails loudly instead of silently forging leaves).
   mode: enabled
-  ca_dir: /ca   # MUST persist across restarts
+  ca_dir: /etc/cortex/ca
+  generate_ca: false
   generate_ca: true
 
 pipeline:
@@ -357,6 +364,9 @@ func (g *gateway) buildInstance(ns, user string) []map[string]any {
 			"data": map[string]any{
 				"tls.crt": base64.StdEncoding.EncodeToString(caCrt),
 				"tls.key": base64.StdEncoding.EncodeToString(caKey),
+				// ca.crt = the trust anchor clients load (same CA as
+				// tls.crt; cortex hands it to agents).
+				"ca.crt": base64.StdEncoding.EncodeToString(caCrt),
 			},
 		},
 		{
@@ -786,6 +796,46 @@ func (g *gateway) waitForEngine(ctx context.Context, ns string) (string, error) 
 // no live connections. Only users the gateway has seen (heartbeat or
 // connection) are tracked; instances never touched by the gateway are
 // left as they are.
+// healLoop keeps every user namespace's cortex-gateway Endpoints pinned
+// to the current gateway pod IPs. Those Endpoints are selector-less
+// (per-user Routes cannot target a Service in the cortex namespace), so
+// they are written only at provision time — a gateway rollout changes
+// pod IPs and leaves every user route pointing at dead pods, and the
+// wake path that would heal them runs through those very routes.
+// Chicken-and-egg; break it from inside the gateway.
+func (g *gateway) healLoop() {
+	for range time.Tick(30 * time.Second) {
+		code, body, err := g.kube.req("GET",
+			"/api/v1/namespaces?labelSelector="+url.QueryEscape("cortex-user"), nil, "")
+		if err != nil || code != 200 {
+			continue
+		}
+		var nl struct {
+			Items []struct {
+				Metadata struct {
+					Name string `json:"name"`
+				} `json:"metadata"`
+			} `json:"items"`
+		}
+		if json.Unmarshal(body, &nl) != nil {
+			continue
+		}
+		meta := map[string]any{"name": "cortex-gateway"}
+		want := map[string]any{
+			"apiVersion": "v1", "kind": "Endpoints", "metadata": meta,
+			"subsets": []any{map[string]any{
+				"addresses": addrMaps(g.gatewayAddrs()),
+				// Port NAME must match the Routes' targetPort ("proxy").
+				"ports": []any{map[string]any{"name": "proxy", "port": 13000, "protocol": "TCP"}},
+			}},
+		}
+		for _, ns := range nl.Items {
+			meta["namespace"] = ns.Metadata.Name
+			g.healEndpoints("/api/v1/namespaces/"+ns.Metadata.Name+"/endpoints/cortex-gateway", want)
+		}
+	}
+}
+
 func (g *gateway) reapLoop() {
 	for range time.Tick(time.Minute) {
 		cutoff := time.Now().Add(-*idleTimeout)
@@ -1276,6 +1326,7 @@ func main() {
 	g := &gateway{kube: k, cert: &cert}
 
 	go g.reapLoop()
+	go g.healLoop()
 
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("/__cortex/heartbeat", g.handleHeartbeat)
