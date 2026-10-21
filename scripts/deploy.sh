@@ -86,7 +86,10 @@ oc create namespace cortex 2>/dev/null || true
 
 if ! oc get oauthclient cortex >/dev/null 2>&1; then
   OAUTH_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/')
-  oc process -f manifests/oauthclient.yaml \
+  # -n matters: oc process resolves templates against the AMBIENT
+  # project from the kubeconfig context, and fails with "namespaces
+  # … not found" when that project no longer exists on the cluster.
+  oc process -f manifests/oauthclient.yaml -n cortex \
     -p DOMAIN="$APPS_DOMAIN" -p SECRET="$OAUTH_SECRET" | oc apply -f -
   oc create secret generic cortex-oauth -n cortex \
     --from-literal=OAUTH_BASIC=$(printf 'cortex:%s' "$OAUTH_SECRET" | base64 -w0)
