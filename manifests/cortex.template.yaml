@@ -214,29 +214,6 @@ spec:
     - port: 8080
       targetPort: 8080
 ---
-# The router terminates TLS with the cluster wildcard cert
-# (externalCertificate) and redirects http:80 to https:443.
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: cortex
-  namespace: cortex
-  labels:
-    app: cortex
-spec:
-  host: cortex.__APPS_DOMAIN__
-  to:
-    kind: Service
-    name: cortex
-    weight: 100
-  port:
-    targetPort: 8080
-  tls:
-    termination: edge
-    insecureEdgeTerminationPolicy: Redirect
-    externalCertificate:
-      name: cortex-tls
----
 # Lets the router service account read the cortex-tls secret for the
 # edge route's externalCertificate (scoped to this one secret).
 apiVersion: rbac.authorization.k8s.io/v1
@@ -263,3 +240,26 @@ subjects:
   - kind: ServiceAccount
     name: router
     namespace: openshift-ingress
+---
+# The router terminates TLS with the cluster wildcard cert
+# (externalCertificate) and redirects http:80 to https:443.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cortex
+  namespace: cortex
+  labels:
+    app: cortex
+spec:
+  host: cortex.__APPS_DOMAIN__
+  to:
+    kind: Service
+    name: cortex
+    weight: 100
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: cortex-tls

@@ -77,10 +77,13 @@ for t in cortex gateway; do
       manifests/$t.template.yaml > $RENDERED/$t.yaml
 done
 
-oc apply -f $RENDERED/cortex.yaml
-oc apply -f $RENDERED/gateway.yaml
+# --- namespace + secrets + OAuthClient FIRST -------------------------------
+# The Route references Secret cortex-tls (externalCertificate) and the
+# router must already be authorized to read it (router-cert-reader),
+# so these exist before the manifests are applied.
 
-# --- OAuthClient + secrets (only if missing) --------------------------------
+oc create namespace cortex 2>/dev/null || true
+
 if ! oc get oauthclient cortex >/dev/null 2>&1; then
   OAUTH_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/')
   oc process -f manifests/oauthclient.yaml \
@@ -98,9 +101,10 @@ if ! oc get secret cortex-tls -n cortex >/dev/null 2>&1; then
   CERT_NAME=$(oc get ingresscontroller default -n openshift-ingress-operator \
     -o jsonpath='{.spec.defaultCertificate.name}')
   if [ -z "$CERT_NAME" ]; then
-    echo "WARNING: ingresscontroller has no defaultCertificate." >&2
-    echo "Create Secret cortex/cortex-tls manually (wildcard cert for" >&2
-    echo "*.$APPS_DOMAIN) and restart the gateway deployment." >&2
+    echo "ERROR: ingresscontroller has no defaultCertificate, and there" >&2
+    echo "is no Secret cortex/cortex-tls. Create it manually (wildcard" >&2
+    echo "cert for *.$APPS_DOMAIN) and re-run." >&2
+    exit 1
   else
     oc get secret "$CERT_NAME" -n openshift-ingress -o json \
       | jq 'del(.metadata.namespace,.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,.metadata.managedFields) | .metadata.name="cortex-tls"' \
@@ -108,6 +112,18 @@ if ! oc get secret cortex-tls -n cortex >/dev/null 2>&1; then
     echo "copied router cert $CERT_NAME -> Secret cortex/cortex-tls"
   fi
 fi
+
+# --- apply rendered manifests ----------------------------------------------
+# Retry once: the router-cert-reader RoleBinding lands moments before
+# the Route references the secret, and RBAC propagation can lag.
+for attempt in 1 2; do
+  if oc apply -f $RENDERED/cortex.yaml && oc apply -f $RENDERED/gateway.yaml; then
+    break
+  fi
+  if [ $attempt = 2 ]; then echo "manifest apply failed" >&2; exit 1; fi
+  echo "apply failed — waiting 10s for RBAC propagation, retrying…"
+  sleep 10
+done
 
 # --- wait -------------------------------------------------------------------
 oc rollout status deployment/cortex-gateway -n cortex --timeout=300s
