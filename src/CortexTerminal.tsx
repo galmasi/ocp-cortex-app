@@ -65,10 +65,23 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
     // NOTE: the WebSocket constructor REQUIRES an absolute ws:// or
     // wss:// URL — a relative path throws SyntaxError before any
     // request is made.
+    //
+    // Some clusters (epoc001: an API middlebox in front of the
+    // apiserver) 403 every websocket-upgrade request to exec — the
+    // browser can never attach directly there. The cortex-gateway
+    // offers /__cortex/exec: the SAME v5.channel.k8s.io framing, but
+    // the gateway runs the exec over SPDY with the user's token. On a
+    // socket error before the connection opens, we fall back to it
+    // once and use it for every exec afterwards (attach + resizes).
+    type ExecMode = 'direct' | 'gateway';
+    let mode: ExecMode = 'direct';
     const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const base = `${wsProto}://${window.location.host}` +
+    const directBase = `${wsProto}://${window.location.host}` +
       `/ws/api/v1/namespaces/${encodeURIComponent(namespace)}` +
       `/pods/${encodeURIComponent(pod)}/exec`;
+    const gatewayBase = `${wsProto}://${window.location.host}/__cortex/exec` +
+      `?ns=${encodeURIComponent(namespace)}` +
+      `&pod=${encodeURIComponent(pod)}`;
     // exec takes the command as repeated ?command= query params.
     // NOTE: build the query with encodeURIComponent, NOT URLSearchParams —
     // URLSearchParams uses the x-www-form-urlencoded serializer, which
@@ -82,15 +95,32 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
         `access_token=${encodeURIComponent(token)}`,
         ...cmd.map((c) => `command=${encodeURIComponent(c)}`),
       ];
-      return `${base}?${q.join('&')}`;
+      const base = mode === 'direct'
+        ? `${directBase}?${q.join('&')}`
+        : `${gatewayBase}&${q.join('&')}`;
+      return base;
     };
-    const ws = new WebSocket(
+    let ws = new WebSocket(
       execUrl(['tmux', 'attach', '-t', 'agentop']) + '&stdin=1&tty=true',
       'v5.channel.k8s.io',
     );
     ws.binaryType = 'arraybuffer';
 
     let open = true;
+    let opened = false; // has the current connection ever reached onopen?
+
+    // Attach all protocol handlers to a socket (used for the initial
+    // direct connection and for the gateway-relay fallback alike).
+    const onOpen = (sock: WebSocket) => {
+      sock.onopen = () => {
+        opened = true;
+        // Match the tmux session to the on-screen terminal right away,
+        // and once more after the attach has settled (guards against a
+        // race with session creation on a fresh pod).
+        resizeSession();
+        window.setTimeout(resizeSession, 1500);
+      };
+    };
 
     // Resize the tmux session AND every attached client's PTY.
     //
@@ -133,14 +163,6 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
       }, 300);
     };
 
-    ws.onopen = () => {
-      // Match the tmux session to the on-screen terminal right away,
-      // and once more after the attach has settled (guards against a
-      // race with session creation on a fresh pod).
-      resizeSession();
-      window.setTimeout(resizeSession, 1500);
-    };
-
     // Terminal query responder. TUIs (bubbletea/termenv) probe the
     // terminal at startup — OSC 11 (background color) and CSI 6n (cursor
     // position) — and block until an answer arrives. A real terminal
@@ -173,7 +195,10 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
       }
     };
 
-    ws.onmessage = (ev: MessageEvent) => {
+    const wire = (sock: WebSocket) => {
+      onOpen(sock);
+
+    sock.onmessage = (ev: MessageEvent) => {
       const data = new Uint8Array(ev.data as ArrayBuffer);
       const channel = data[0];
       const payload = data.subarray(1);
@@ -189,12 +214,27 @@ const CortexTerminal: React.FC<CortexTerminalProps> = ({
       }
     };
 
-    ws.onerror = () =>
+    sock.onerror = () => {
+      // Direct exec blocked (e.g. the epoc001 API middlebox 403s WS
+      // upgrades)? Retry once through the gateway's SPDY relay.
+      if (!opened && mode === 'direct') {
+        mode = 'gateway';
+        term.write('\r\n\x1b[33m[direct exec refused; using gateway relay]\x1b[0m\r\n');
+        ws = new WebSocket(
+          execUrl(['tmux', 'attach', '-t', 'agentop']) + '&stdin=1&tty=true',
+          'v5.channel.k8s.io',
+        );
+        ws.binaryType = 'arraybuffer';
+        wire(ws);
+        return;
+      }
       term.write('\r\n\x1b[31m[socket error]\x1b[0m\r\n');
-    ws.onclose = () => {
-      if (open) term.write('\r\n\x1b[31m[connection closed]\x1b[0m\r\n');
     };
-
+    sock.onclose = () => {
+      if (open && opened) term.write('\r\n\x1b[31m[connection closed]\x1b[0m\r\n');
+    };
+    };
+    wire(ws);
     // Keystrokes -> stdin (channel 0 prefix).
     const dataSub = term.onData((input) => {
       if (ws.readyState !== WebSocket.OPEN) return;

@@ -1,7 +1,7 @@
 # cortex-gateway — see DESIGN.md "Part 2 — gateway".
 FROM docker.io/library/golang:1.22 AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY main.go ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/cortex-gateway .
 

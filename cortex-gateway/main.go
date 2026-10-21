@@ -46,6 +46,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 var (
@@ -939,6 +943,178 @@ func (g *gateway) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// exec relay (websocket <-> SPDY)
+
+// Some clusters (epoc001: OpenShift 4.20 behind an API middlebox) 403
+// every websocket-upgrade request to the apiserver's exec/attach
+// endpoints — even in-cluster, even for admin, even for oc itself (oc
+// silently falls back to SPDY, which the middlebox allows). Browsers
+// cannot speak SPDY, so the SPA cannot exec directly on such clusters.
+//
+// This endpoint is the shim: the browser opens a websocket to the
+// gateway speaking the SAME v5.channel.k8s.io framing it would use
+// against the apiserver, and the gateway runs the exec over SPDY with
+// the USER's token — the apiserver still enforces that user's RBAC,
+// and this gateway gains no privilege it did not have.
+
+var wsUpgrader = websocket.Upgrader{
+	Subprotocols:  []string{"v5.channel.k8s.io", "v4.channel.k8s.io"},
+	ReadBufferSize:  8192,
+	WriteBufferSize: 8192,
+}
+
+// wsTermQueue feeds remotecommand's resize channel from channel-4
+// websocket frames.
+type wsTermQueue struct {
+	ch chan remotecommand.TerminalSize
+}
+
+func (q *wsTermQueue) Next() *remotecommand.TerminalSize {
+	s, ok := <-q.ch
+	if !ok {
+		return nil
+	}
+	return &s
+}
+
+func (g *gateway) handleExec(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ns, pod, container, token := q.Get("ns"), q.Get("pod"), q.Get("container"), q.Get("access_token")
+	cmds := q["command"]
+	if ns == "" || pod == "" || token == "" || len(cmds) == 0 {
+		http.Error(w, "ns, pod, command, access_token required", http.StatusBadRequest)
+		return
+	}
+
+	ws, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("exec: websocket upgrade: %v", err)
+		return
+	}
+	defer ws.Close()
+	log.Printf("exec: relay %s/%s container=%s cmd=%q", ns, pod, container, cmds)
+
+	// SPDY executor with the user's token (in-cluster apiserver, SA CA).
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		log.Printf("exec: in-cluster config: %v", err)
+		return
+	}
+	cfg.BearerToken = token
+	cfg.BearerTokenFile = ""
+
+	execURL, err := url.Parse(cfg.Host)
+	if err != nil {
+		log.Printf("exec: apiserver url: %v", err)
+		return
+	}
+	execURL.Path = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/exec", ns, pod)
+	v := url.Values{}
+	for _, c := range cmds {
+		v.Add("command", c)
+	}
+	v.Set("container", container)
+	v.Set("stdin", strconv.FormatBool(q.Get("stdin") != ""))
+	// Always ask the apiserver for stdout+stderr: with either absent,
+	// client-go's SPDY stream setup blocks forever waiting for the
+	// stream the apiserver never opens (verified empirically — same
+	// class of hang as Stdin below). The browser just ignores the
+	// channel frames it did not ask for.
+	v.Set("stdout", "true")
+	v.Set("stderr", "true")
+	v.Set("tty", strconv.FormatBool(q.Get("tty") != ""))
+	execURL.RawQuery = v.Encode()
+
+	exec, err := remotecommand.NewSPDYExecutor(cfg, "POST", execURL)
+	if err != nil {
+		log.Printf("exec: spdy executor: %v", err)
+		return
+	}
+
+	// Channel framing matches v5.channel.k8s.io: every frame's first
+	// byte is the channel (0 stdin, 1 stdout, 2 stderr, 3 error,
+	// 4 resize). Writes are serialized; reads happen in this loop only.
+	var wmu sync.Mutex
+	send := func(ch byte, data []byte) {
+		wmu.Lock()
+		defer wmu.Unlock()
+		buf := make([]byte, len(data)+1)
+		buf[0] = ch
+		copy(buf[1:], data)
+		_ = ws.WriteMessage(websocket.BinaryMessage, buf)
+	}
+
+	stdinR, stdinW := io.Pipe()
+	queue := &wsTermQueue{ch: make(chan remotecommand.TerminalSize, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamDone := make(chan error, 1)
+	go func() {
+		opts := remotecommand.StreamOptions{
+			Stdout: writerFunc(func(p []byte) (int, error) { send(1, p); return len(p), nil }),
+			Stderr: writerFunc(func(p []byte) (int, error) { send(2, p); return len(p), nil }),
+			Tty:    q.Get("tty") != "",
+			TerminalSizeQueue: queue,
+		}
+		// Only wire Stdin when the caller asked for it: with stdin
+		// absent from the exec request the apiserver never opens the
+		// input stream, and a non-nil Stdin makes remotecommand block
+		// forever waiting for it (verified empirically).
+		if q.Get("stdin") != "" {
+			opts.Stdin = stdinR
+		}
+		err := exec.StreamWithContext(ctx, opts)
+		stdinW.Close() // unblocks a pending stdin write
+		streamDone <- err
+	}()
+
+	go func() {
+		// When the exec finishes, tell the browser why (error channel
+		// 3, like the apiserver would) and close the websocket.
+		err := <-streamDone
+		log.Printf("exec: stream finished: %v", err)
+		if err != nil {
+			send(3, []byte(err.Error()))
+		}
+		_ = ws.Close()
+	}()
+
+	for {
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			cancel()
+			return
+		}
+		if len(data) == 0 {
+			continue
+		}
+		switch data[0] {
+		case 0: // stdin
+			if _, err := stdinW.Write(data[1:]); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				log.Printf("exec: stdin: %v", err)
+			}
+		case 4: // terminal resize {"Width":n,"Height":n}
+			var s struct {
+				Width  uint16 `json:"Width"`
+				Height uint16 `json:"Height"`
+			}
+			if err := json.Unmarshal(data[1:], &s); err == nil && (s.Width > 0 || s.Height > 0) {
+				select {
+				case queue.ch <- remotecommand.TerminalSize{Width: s.Width, Height: s.Height}:
+				default: // drop rather than block the read loop; latest wins anyway
+				}
+			}
+		}
+	}
+}
+
+// writerFunc adapts a func into an io.Writer.
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// ---------------------------------------------------------------------------
 // main
 
 // discoverAppsDomain reads the cluster's ingress config — the same
@@ -987,6 +1163,7 @@ func main() {
 	adminMux.HandleFunc("/__cortex/heartbeat", g.handleHeartbeat)
 	adminMux.HandleFunc("/__cortex/provision", g.handleProvision)
 	adminMux.HandleFunc("/__cortex/status", g.handleStatus)
+	adminMux.HandleFunc("/__cortex/exec", g.handleExec)
 	go func() {
 		log.Fatal(http.ListenAndServe(*adminAddr, adminMux))
 	}()

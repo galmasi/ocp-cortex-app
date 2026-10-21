@@ -79,7 +79,10 @@ http {
       proxy_ssl_name __API_UPSTREAM__;
     }
 
-    # --- Gateway admin (same-origin): SPA provision + heartbeat.
+    # --- Gateway admin (same-origin): SPA provision + heartbeat,
+    # and the exec relay websocket (browser WS <-> gateway SPDY;
+    # used when the cluster's apiserver path blocks WS exec
+    # upgrades — the SPA falls back to it automatically).
     # Reached via the cortex-gw edge route, not the service ClusterIP
     # (unreachable from pods on this cluster); the router presents the
     # Let's Encrypt wildcard, which is not in the serviceaccount CA,
@@ -89,6 +92,11 @@ http {
       proxy_set_header Authorization $http_authorization;
       proxy_ssl_server_name on;
       proxy_ssl_verify off;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
     }
 
     # --- exec/attach WebSockets: token from ?access_token= ---
