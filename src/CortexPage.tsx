@@ -315,7 +315,7 @@ const CortexPage: React.FC<CortexPageProps> = ({ token, user, onSessionExpired }
     <>
       <PageSection>
         <Title headingLevel="h1" size="2xl">
-          Cortex{' '}
+          Remote Cortex{' '}
           <span style={{ fontSize: '13px', fontWeight: 'normal' }}>
             (v{APP_VERSION})
           </span>
@@ -337,12 +337,53 @@ const CortexPage: React.FC<CortexPageProps> = ({ token, user, onSessionExpired }
             ) : null}
           </span>
         </Title>
-        {/* TODO: this will become a link to a page served by this app
-            for installing/configuring claude code instances to point
-            at the per-user proxy. */}
-        <p style={{ fontSize: '13px', color: '#6a6e73', marginTop: '4px' }}>
-          place holder -- user instructions
-        </p>
+        {/* User-facing endpoints and entry points. The forward proxy is
+            what user tools (e.g. claude code) point at; the reverse
+            proxy is the engine's upstream forward target. */}
+        <Card style={{ marginTop: '8px' }}>
+          <CardTitle>User Information</CardTitle>
+          <CardBody>
+            <table style={{ fontSize: '13px', borderCollapse: 'collapse' }}>
+              <tbody>
+                <tr>
+                  <td style={{ padding: '4px 16px 4px 0', fontWeight: 600 }}>User name</td>
+                  <td style={{ padding: '4px 0' }}>
+                    {userName ? <code>{userName}</code> : '—'}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ padding: '4px 16px 4px 0', fontWeight: 600 }}>Forward proxy endpoint</td>
+                  <td style={{ padding: '4px 0' }}>
+                    {userName ? (
+                      <code>https://cortex-{sanitize(userName)}.{CLUSTER_APPS_DOMAIN}</code>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ padding: '4px 16px 4px 0', fontWeight: 600 }}>Reverse proxy endpoint</td>
+                  <td style={{ padding: '4px 0' }}>
+                    {userName ? (
+                      <code>https://cortex-{sanitize(userName)}-r.{CLUSTER_APPS_DOMAIN}</code>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ padding: '4px 16px 4px 0', fontWeight: 600 }}>User install script</td>
+                  <td style={{ padding: '4px 0' }}>
+                    {/* TODO: link to the install/config page served by
+                        this app for pointing claude code instances at
+                        the per-user proxy. */}
+                    <a href="#">install.sh</a> (coming soon)
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </CardBody>
+        </Card>
       </PageSection>
       {/* Reduced left gutter; keep a matching right gutter so the
           terminal doesn't abut the browser edge. */}
