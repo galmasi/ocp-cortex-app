@@ -264,7 +264,9 @@ func cortexConfigYaml(user string) string {
   # the engine binds on :8080 by default (engineRevPort, our dial
   # target for the cortex-<user>-r route).
   transparent_proxy_addr: ":%d"
-  reverse_proxy_backend: "http://127.0.0.1:1"
+  # Default reverse proxy backend (Curvebender); user-changeable from
+  # the plugin page, which rewrites this line and restarts the engine.
+  reverse_proxy_backend: "https://litellm.cb.ete.res.ibm.com"
   session_api_addr: "127.0.0.1:%d"
 
 tls_bridge:
